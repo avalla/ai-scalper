@@ -1,0 +1,12 @@
+{
+  "name": "@ai-scalper/market-scanner",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ai-scalper/bybit-client": "workspace:*",
+    "@ai-scalper/trading-core": "workspace:*"
+  }
+}

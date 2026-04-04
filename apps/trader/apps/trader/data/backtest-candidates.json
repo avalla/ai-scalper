@@ -1,0 +1,51 @@
+{
+  "generatedAt": "2026-03-31T15:40:50.921Z",
+  "status": "pending",
+  "candidates": [
+    {
+      "symbol": "HYPEUSDT",
+      "score": 100,
+      "netEdgeBps": 5.27,
+      "minuteRangeBps": 20.55,
+      "spreadBps": 0.28,
+      "estimatedRoundTripCostBps": 15,
+      "nextStep": "run fee-aware backtest"
+    },
+    {
+      "symbol": "ZECUSDT",
+      "score": 100,
+      "netEdgeBps": 10.2,
+      "minuteRangeBps": 25.61,
+      "spreadBps": 0.4,
+      "estimatedRoundTripCostBps": 15,
+      "nextStep": "run fee-aware backtest"
+    },
+    {
+      "symbol": "FARTCOINUSDT",
+      "score": 100,
+      "netEdgeBps": 6.51,
+      "minuteRangeBps": 22.11,
+      "spreadBps": 0.6,
+      "estimatedRoundTripCostBps": 15,
+      "nextStep": "run fee-aware backtest"
+    },
+    {
+      "symbol": "RIVERUSDT",
+      "score": 99.87,
+      "netEdgeBps": 29.01,
+      "minuteRangeBps": 44.58,
+      "spreadBps": 0.56,
+      "estimatedRoundTripCostBps": 15,
+      "nextStep": "run fee-aware backtest"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "score": 96.75,
+      "netEdgeBps": 4.8,
+      "minuteRangeBps": 19.85,
+      "spreadBps": 0.05,
+      "estimatedRoundTripCostBps": 15,
+      "nextStep": "run fee-aware backtest"
+    }
+  ]
+}

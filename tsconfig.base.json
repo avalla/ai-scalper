@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@ai-scalper/bybit-client": ["packages/bybit-client/src/index.ts"],
+      "@ai-scalper/market-scanner": ["packages/market-scanner/src/index.ts"],
+      "@ai-scalper/queueing": ["packages/queueing/src/index.ts"],
+      "@ai-scalper/trading-core": ["packages/trading-core/src/index.ts"]
+    },
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "noEmit": true,
+    "allowJs": false,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

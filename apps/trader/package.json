@@ -1,0 +1,15 @@
+{
+  "name": "@ai-scalper/trader",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "scan": "TRADER_MODE=scan bun src/index.ts"
+  },
+  "dependencies": {
+    "@ai-scalper/bybit-client": "workspace:*",
+    "@ai-scalper/market-scanner": "workspace:*",
+    "@ai-scalper/trading-core": "workspace:*"
+  }
+}

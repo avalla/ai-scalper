@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/bybit-client" },
+    { "path": "../../packages/market-scanner" },
+    { "path": "../../packages/trading-core" }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/bybit-client" },
+    { "path": "./packages/market-scanner" },
+    { "path": "./packages/queueing" },
+    { "path": "./packages/trading-core" },
+    { "path": "./apps/trader" },
+    { "path": "./apps/worker" }
+  ]
+}

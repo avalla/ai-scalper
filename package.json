@@ -1,0 +1,24 @@
+{
+  "name": "ai-scalper",
+  "private": true,
+  "packageManager": "bun@1.3.6",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --filter @ai-scalper/trader dev",
+    "start": "bun run --filter @ai-scalper/trader start",
+    "scan": "bun run --filter @ai-scalper/trader scan",
+    "worker": "bun run --filter @ai-scalper/worker worker",
+    "enqueue:scan": "bun run --filter @ai-scalper/worker enqueue:scan",
+    "typecheck": "bunx tsc -b tsconfig.json",
+    "typecheck:all": "bunx tsc -b tsconfig.json",
+    "lint": "bunx tsc -b tsconfig.json --pretty false",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}
