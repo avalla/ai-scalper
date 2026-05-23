@@ -95,6 +95,7 @@ export interface TraderConfig {
   scanMinOpenInterestUsd: number;
   scanMinListingAgeDays: number;
   feeRoundTripBps: number;
+  requireLocalMaConfirmation: boolean;
 }
 
 function resolveIncludeAggressiveVariants(
@@ -275,5 +276,8 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     feeRoundTripBps: env.BYBIT_FEE_ROUND_TRIP_BPS
       ? Number(env.BYBIT_FEE_ROUND_TRIP_BPS)
       : ((cfg as { bybit?: { feeRoundTripBps?: number } }).bybit?.feeRoundTripBps ?? 0),
+    requireLocalMaConfirmation: env.REQUIRE_LOCAL_MA_CONFIRMATION
+      ? env.REQUIRE_LOCAL_MA_CONFIRMATION === "true"
+      : ((cfg as { strategy?: { requireLocalMaConfirmation?: boolean } }).strategy?.requireLocalMaConfirmation ?? true),
   };
 }

@@ -1346,7 +1346,8 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       ? buildSignal({ prices, fastWindow: config.fastWindow, slowWindow: config.slowWindow, thresholdBps: config.thresholdBps })
       : "flat";
     const fundingBlocked = Math.abs(fundingRateBps) > config.riskMaxFundingRateBps;
-    const entryAction: StrategySignal = action !== "flat" && action === localSignal && !fundingBlocked ? action : "flat";
+    const localMaPasses = config.requireLocalMaConfirmation ? action === localSignal : true;
+    const entryAction: StrategySignal = action !== "flat" && localMaPasses && !fundingBlocked ? action : "flat";
     const hourlyMoveBps = activeSetup?.hourlyMoveBps
       ?? Math.abs(((lastPrice - toNumber(ticker.prevPrice1h)) / toNumber(ticker.prevPrice1h)) * 10_000);
     const minuteRangeBps = activeSetup?.minuteRangeBps ?? Math.max(config.takeProfitBps, config.stopLossBps);
@@ -1749,10 +1750,10 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       if (scanAction === "flat") {
         return "scanner-no-direction";
       }
-      if (localSignal === "flat") {
+      if (config.requireLocalMaConfirmation && localSignal === "flat") {
         return `local-MA-flat:scanner=${scanAction}`;
       }
-      if (action !== localSignal) {
+      if (config.requireLocalMaConfirmation && action !== localSignal) {
         return `signal-disagreement:scanner=${scanAction},localMA=${localSignal}`;
       }
       if (fundingBlocked) {
@@ -2073,6 +2074,8 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         aggressiveRisk: aggRiskKey,
         position: state.position,
         mode: config.paperTrading ? "paper" : "live",
+        entryAction,
+        localSignal,
         verdictCounts: Object.fromEntries(activeVerdictCounts),
         totalTicks: ticks + 1,
       }));

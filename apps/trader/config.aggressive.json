@@ -28,7 +28,8 @@
     "slowWindow": 10,
     "thresholdBps": 6,
     "stopLossBps": 20,
-    "takeProfitBps": 80
+    "takeProfitBps": 80,
+    "requireLocalMaConfirmation": false
   },
   "risk": {
     "maxPositionUsd": 1000,
