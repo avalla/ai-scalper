@@ -377,7 +377,7 @@ export function createBybitClient(options: BybitClientOptions = {}) {
       return { alreadySet: false };
     },
 
-    async setTradingStop(request: SetTradingStopRequest): Promise<void> {
+    async setTradingStop(request: SetTradingStopRequest): Promise<{ retCode: number; retMsg: string }> {
       const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
       const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
 
@@ -389,7 +389,7 @@ export function createBybitClient(options: BybitClientOptions = {}) {
         ...(request.positionIdx !== undefined ? { positionIdx: request.positionIdx } : {}),
       };
 
-      await signedRequest<unknown>({
+      const data = await signedRequest<BybitSingleResponse<unknown>>({
         apiKey,
         apiSecret,
         baseUrl,
@@ -398,6 +398,18 @@ export function createBybitClient(options: BybitClientOptions = {}) {
         path: "/v5/position/trading-stop",
         body,
       });
+
+      if (data.retCode !== 0) {
+        const err = new Error(`Bybit set-trading-stop failed: ${data.retMsg}`) as Error & {
+          retCode?: number;
+          retMsg?: string;
+        };
+        err.retCode = data.retCode;
+        err.retMsg = data.retMsg;
+        throw err;
+      }
+
+      return { retCode: data.retCode, retMsg: data.retMsg };
     },
 
     async createOrder(request: CreateOrderRequest): Promise<CreateOrderResponse> {

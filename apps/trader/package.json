@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "scan": "TRADER_MODE=scan bun src/index.ts"
+    "scan": "TRADER_MODE=scan bun src/index.ts",
+    "report": "bun src/scripts/report.ts"
   },
   "dependencies": {
     "@ai-scalper/bybit-client": "workspace:*",

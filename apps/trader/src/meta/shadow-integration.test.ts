@@ -110,6 +110,25 @@ function makeConfig(): TraderConfig {
     metaPnlWindowSize: 50,
     metaIncludeAggressiveVariants: false,
     bybitPositionMode: "one-way",
+    trailingStopEnabled: false,
+    trailingStopActivationBps: 30,
+    trailingStopTrailBps: 15,
+    positionReconcileIntervalTicks: 30,
+    setTradingStopRetryMax: 3,
+    setTradingStopRetryDelayMs: 500,
+    drawdownVelocityWindowMs: 3_600_000,
+    drawdownVelocityMaxUsd: 30,
+    drawdownMaxConsecutiveLosses: 5,
+    confidenceSizingEnabled: false,
+    confidenceSizingMinMultiplier: 0.5,
+    confidenceSizingMaxMultiplier: 2.0,
+    bandit_halfLifeDays: 0,
+    alertWebhookUrl: "",
+    scanGateAutoTuneEnabled: false,
+    scanGateAutoTunePercentile: 75,
+    scanGateAutoTuneFallbackBps: 15,
+    scanMinOpenInterestUsd: 0,
+    scanMinListingAgeDays: 0,
   };
 }
 
@@ -190,6 +209,7 @@ describe("shadow integration", () => {
         warmupMinTrades: config.metaWarmupMinTrades,
         rng,
       });
+      if (pick.allocator) allocator = pick.allocator;
       championPicks.push(pick.championId);
       t++;
     }
@@ -260,7 +280,7 @@ describe("shadow integration", () => {
       metaWarmupMinTrades: 2,
     };
     const variants: Variant[] = defaultVariantPool(config);
-    expect(variants).toHaveLength(8);
+    expect(variants).toHaveLength(9);
 
     const aggressiveLimits: AggressivePerpsLimits = {
       maxLeverage: config.aggressiveMaxLeverage,
@@ -317,20 +337,20 @@ describe("shadow integration", () => {
         warmupMinTrades: config.metaWarmupMinTrades,
         rng,
       });
+      if (pick.allocator) allocator = pick.allocator;
       championPicks.push(pick.championId);
       t++;
     }
 
-    // The 100x variant has stopLossBps=6 → buffer = 100 - 6 = 94 ≥ 50 → NOT
-    // systematically blocked by aggressive risk.
-    const extreme = variants.find((v) => v.id === "agg-100x-extreme")!;
+    // The retuned BTC-only 100x variant has stopLossBps=10 → buffer = 100 - 10 = 90 ≥ 50.
+    const extreme = variants.find((v) => v.id === "agg-100x-btc-only")!;
     expect(extreme.params.leverage).toBe(100);
-    expect(extreme.params.stopLossBps).toBe(6);
+    expect(extreme.params.stopLossBps).toBe(10);
     const liqDistance = 10_000 / extreme.params.leverage;
     expect(liqDistance - extreme.params.stopLossBps).toBeGreaterThanOrEqual(50);
 
     // At least 2 aggressive variants closed ≥1 trade each.
-    const aggIds = ["agg-25x-tight", "agg-50x-tight", "agg-75x-very-tight", "agg-100x-extreme"];
+    const aggIds = ["agg-25x-tight", "agg-50x-tight", "agg-75x-very-tight", "agg-100x-btc-only", "agg-50x-relaxed"];
     const aggressiveTraded = aggIds.filter((id) => (allocator.stats[id]?.closedTrades ?? 0) >= 1);
     expect(aggressiveTraded.length).toBeGreaterThanOrEqual(2);
 

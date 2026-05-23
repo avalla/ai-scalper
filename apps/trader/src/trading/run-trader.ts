@@ -8,14 +8,20 @@ import {
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  applyConfidenceSizing,
   buildSignal,
+  computeTrailingStop,
   evaluateAggressivePerpsRisk,
+  evaluateDrawdownVelocity,
   evaluateRisk,
   getExitReason,
+  reconcilePositions,
+  recordPnlSample,
   resolveProjectPath,
   rolloverDailyPnlIfNeeded,
   selectLeverageForOpportunity,
   updatePaperState,
+  type DrawdownVelocityState,
   type StrategySignal,
   type TraderState,
 } from "@ai-scalper/trading-core";
@@ -31,10 +37,13 @@ import {
   type AllocatorState,
 } from "../meta/allocator";
 import {
+  autoTuneSetupGate,
+  loadScanHistory,
   rankTradeSetups,
   readScanConfig,
   type RankedTradeSetup,
 } from "@ai-scalper/market-scanner";
+import { createWebhookAlerter, type WebhookAlerter } from "../alerts/webhook";
 import type { TraderConfig } from "../config";
 import { buildEntryExecutionPlan } from "./execution-policy";
 import {
@@ -315,6 +324,62 @@ async function executeTrade(params: {
     filled: false,
     fillPrice: entryPlan.limitPrice ?? params.lastPrice,
   };
+}
+
+async function trySetTradingStop(params: {
+  client: ReturnType<typeof createBybitClient>;
+  request: {
+    category: string;
+    symbol: string;
+    stopLoss?: string;
+    takeProfit?: string;
+    positionIdx?: 0 | 1 | 2;
+  };
+  retryMax: number;
+  retryDelayMs: number;
+  alertHook?: WebhookAlerter;
+}): Promise<boolean> {
+  const total = Math.max(1, params.retryMax + 1);
+  for (let i = 0; i < total; i++) {
+    try {
+      await params.client.setTradingStop(params.request);
+      return true;
+    } catch (err) {
+      const code = (err as { retCode?: number }).retCode;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (code === 110017) {
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "set-trading-stop-hedge-mismatch",
+          symbol: params.request.symbol,
+          retCode: code,
+          error: msg,
+        }));
+        return false;
+      }
+      const isLast = i === total - 1;
+      if (isLast) {
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "set-trading-stop-failed-after-retries",
+          symbol: params.request.symbol,
+          attempts: total,
+          retCode: code ?? null,
+          error: msg,
+        }));
+        if (params.alertHook) {
+          await params.alertHook.send(
+            `setTradingStop failed for ${params.request.symbol} after ${total} attempts: ${msg}`,
+            { retCode: code ?? null },
+          );
+        }
+        return false;
+      }
+      const delay = params.retryDelayMs * Math.pow(2, i);
+      await sleep(delay);
+    }
+  }
+  return false;
 }
 
 function toExecutedQuantity(order: RealtimeOrder | null): number {
@@ -710,6 +775,15 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   } | null = null;
   let entryTick: number | null = null;
   let safetyStopPlaced = false;
+  // Phase 1B additions
+  const alerter = createWebhookAlerter(config.alertWebhookUrl);
+  let forceLogicalExitForCurrentPosition = false;
+  let lastReconcileTick = 0;
+  let haltEntriesUntilCleared = false;
+  let drawdownVelocityState: DrawdownVelocityState = { recentPnlSamples: [] };
+  const recentOutcomes: Array<"win" | "loss"> = [];
+  let effectiveMinSetupNetEdgeBps: number = config.tradeMinSetupNetEdgeBps;
+  const filteredVariantLoggedFor = new Set<string>();
   let state: TraderState = {
     lastTradeAt: null,
     realizedPnlUsd: 0,
@@ -823,6 +897,35 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         cachedRankedSetups = await rankTradeSetups(scanConfig);
         lastScanAt = Date.now();
         lastScanGeneratedAt = observedAt;
+
+        if (config.scanGateAutoTuneEnabled) {
+          try {
+            const history = await loadScanHistory();
+            const tunedGate = autoTuneSetupGate({
+              scanHistory: history,
+              targetPercentile: config.scanGateAutoTunePercentile,
+              fallbackBps: config.scanGateAutoTuneFallbackBps,
+            });
+            effectiveMinSetupNetEdgeBps = tunedGate;
+            console.log(JSON.stringify({
+              ts: new Date().toISOString(),
+              event: "setup-gate-auto-tuned",
+              fallback: config.scanGateAutoTuneFallbackBps,
+              tuned: tunedGate,
+              historyLen: history.length,
+              percentile: config.scanGateAutoTunePercentile,
+            }));
+          } catch (err) {
+            effectiveMinSetupNetEdgeBps = config.tradeMinSetupNetEdgeBps;
+            console.log(JSON.stringify({
+              ts: new Date().toISOString(),
+              event: "setup-gate-auto-tune-failed",
+              error: err instanceof Error ? err.message : String(err),
+            }));
+          }
+        } else {
+          effectiveMinSetupNetEdgeBps = config.tradeMinSetupNetEdgeBps;
+        }
 
         if (!config.paperTrading && config.autoSizeFromWallet) {
           try {
@@ -1071,7 +1174,27 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       orderUsd: config.orderUsd,
     };
     if (config.metaEnabled && allocator && pool.length > 0) {
-      for (const variant of pool) {
+      const eligibleVariants = pool.filter(
+        (v) => !v.symbolFilter || v.symbolFilter.includes(activeSymbol),
+      );
+      if (eligibleVariants.length !== pool.length) {
+        const logKey = `${activeSymbol}:${eligibleVariants.length}/${pool.length}`;
+        if (!filteredVariantLoggedFor.has(logKey)) {
+          filteredVariantLoggedFor.add(logKey);
+          console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            event: "variant-filtered-by-symbol",
+            activeSymbol,
+            eligibleCount: eligibleVariants.length,
+            totalCount: pool.length,
+            excluded: pool
+              .filter((v) => v.symbolFilter && !v.symbolFilter.includes(activeSymbol))
+              .map((v) => v.id),
+          }));
+        }
+      }
+
+      for (const variant of eligibleVariants) {
         const prevVariantState = perVariantStates.get(variant.id) ?? {
           lastTradeAt: null,
           realizedPnlUsd: 0,
@@ -1100,14 +1223,19 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         }
         perVariantStates.set(variant.id, result.state);
       }
+      const championVariants = eligibleVariants.length > 0 ? eligibleVariants : pool;
       const champion = selectChampion({
         allocator,
-        variants: pool,
+        variants: championVariants,
         now: Date.now(),
         warmupMinTrades: config.metaWarmupMinTrades,
+        halfLifeDays: config.bandit_halfLifeDays > 0 ? config.bandit_halfLifeDays : undefined,
       });
       championId = champion.championId;
       championReason = champion.reason;
+      if (champion.allocator) {
+        allocator = champion.allocator;
+      }
       const championVariant = pool.find((v) => v.id === championId);
       if (championVariant) {
         championParams = {
@@ -1123,9 +1251,21 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     const effectiveStopLossBps = config.metaEnabled ? championParams.stopLossBps : config.stopLossBps;
     const effectiveTakeProfitBps = config.metaEnabled ? championParams.takeProfitBps : config.takeProfitBps;
     // User decision #1: clamp variant.orderUsd via min(variant.orderUsd, walletSizing.orderUsd).
-    const effectiveOrderUsdPreClamp = config.metaEnabled
+    let effectiveOrderUsdPreClamp = config.metaEnabled
       ? Math.min(championParams.orderUsd, walletSizing.orderUsd)
       : walletSizing.orderUsd;
+    let confidenceMultiplier = 1;
+    if (config.confidenceSizingEnabled && activeSetup) {
+      const sized = applyConfidenceSizing({
+        baseOrderUsd: effectiveOrderUsdPreClamp,
+        scanScore: activeSetup.score,
+        referenceScore: config.tradeMinSetupScore,
+        minMultiplier: config.confidenceSizingMinMultiplier,
+        maxMultiplier: config.confidenceSizingMaxMultiplier,
+      });
+      effectiveOrderUsdPreClamp = sized.orderUsd;
+      confidenceMultiplier = sized.multiplier;
+    }
     if (config.metaEnabled && championParams.orderUsd > walletSizing.orderUsd) {
       if (!championClampedSymbols.has(activeSymbol)) {
         championClampedSymbols.add(activeSymbol);
@@ -1168,7 +1308,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     }
 
     const topSetupGateReason = evaluateTopSetupGate({
-      minNetEdgeBps: config.tradeMinSetupNetEdgeBps,
+      minNetEdgeBps: effectiveMinSetupNetEdgeBps,
       minScore: config.tradeMinSetupScore,
       setup: activeSetup,
     });
@@ -1209,6 +1349,80 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           reason: "exceptional-disabled",
         };
     const activeLeverage = clampLeverage(leverageDecision.leverage, instrument);
+
+    // ── Position reconciliation (live only) ──────────────────────────────────
+    if (
+      !config.paperTrading
+      && config.positionReconcileIntervalTicks > 0
+      && ticks - lastReconcileTick >= config.positionReconcileIntervalTicks
+    ) {
+      lastReconcileTick = ticks;
+      const observed = await client.getPosition({
+        category: config.category,
+        symbol: activeSymbol,
+      }).catch(() => null);
+      const reconciled = reconcilePositions({
+        expected: state.position,
+        observed: observed ? {
+          side: observed.side as "Buy" | "Sell",
+          size: toNumber(observed.size),
+          avgPrice: toNumber(observed.avgPrice),
+        } : null,
+      });
+      if (!reconciled.aligned) {
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "position-drift-detected",
+          symbol: activeSymbol,
+          drift: reconciled.drift,
+          details: reconciled.details ?? null,
+        }));
+        await alerter.send(`position drift: ${reconciled.drift}`, {
+          symbol: activeSymbol,
+          details: reconciled.details ?? null,
+        });
+
+        if (reconciled.drift === "missing-on-exchange") {
+          // Bybit closed the position (likely native SL/TP) — clear local state.
+          state = { ...state, position: null };
+          openPositionSymbol = null;
+          safetyStopPlaced = false;
+          entryTick = null;
+          championIdAtEntry = null;
+          forceLogicalExitForCurrentPosition = false;
+          await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
+            openPositionSymbol,
+            state,
+          }));
+        } else if (reconciled.drift === "extra-on-exchange") {
+          // Halt new entries until manually cleared (do not auto-close).
+          haltEntriesUntilCleared = true;
+        } else if (
+          (reconciled.drift === "side-mismatch" || reconciled.drift === "size-mismatch")
+          && observed
+        ) {
+          // Broker is ground truth: update local state to match.
+          const observedSide: "long" | "short" = observed.side === "Buy" ? "long" : "short";
+          const observedSize = toNumber(observed.size);
+          const observedAvg = toNumber(observed.avgPrice);
+          if (state.position) {
+            state = {
+              ...state,
+              position: {
+                ...state.position,
+                side: observedSide,
+                quantity: observedSize,
+                entryPrice: observedAvg || state.position.entryPrice,
+              },
+            };
+            await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
+              openPositionSymbol,
+              state,
+            }));
+          }
+        }
+      }
+    }
 
     const exitReason = getExitReason({
       marketPrice: lastPrice,
@@ -1280,6 +1494,36 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             state: symbolAvailability.get(activeSymbol),
             threshold: 1,
           }));
+        }
+        forceLogicalExitForCurrentPosition = false;
+        const pnlDelta = state.realizedPnlUsd - previousState.realizedPnlUsd;
+        recentOutcomes.push(pnlDelta >= 0 ? "win" : "loss");
+        if (recentOutcomes.length > 200) recentOutcomes.shift();
+        drawdownVelocityState = recordPnlSample(
+          drawdownVelocityState,
+          Date.now(),
+          state.realizedPnlUsd,
+          config.drawdownVelocityWindowMs,
+        );
+        const verdict = evaluateDrawdownVelocity(drawdownVelocityState, {
+          now: Date.now(),
+          windowMs: config.drawdownVelocityWindowMs,
+          maxDrawdownInWindowUsd: config.drawdownVelocityMaxUsd,
+          maxConsecutiveLosses: config.drawdownMaxConsecutiveLosses,
+          closedTradeOutcomes: recentOutcomes,
+        });
+        if (verdict.halted) {
+          console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            event: "drawdown-halt",
+            reason: verdict.reason,
+            cumulativePnlUsd: state.realizedPnlUsd,
+            recentOutcomes: recentOutcomes.slice(-10),
+          }));
+          await alerter.send(`drawdown halt: ${verdict.reason}`, {
+            cumulativePnlUsd: state.realizedPnlUsd,
+          });
+          stopRequested = true;
         }
         pendingClose = null;
       } else if (isCancelledOrRejected) {
@@ -1360,6 +1604,36 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             state: symbolAvailability.get(activeSymbol),
             threshold: 1,
           }));
+        }
+        forceLogicalExitForCurrentPosition = false;
+        const pnlDelta2 = state.realizedPnlUsd - previousState.realizedPnlUsd;
+        recentOutcomes.push(pnlDelta2 >= 0 ? "win" : "loss");
+        if (recentOutcomes.length > 200) recentOutcomes.shift();
+        drawdownVelocityState = recordPnlSample(
+          drawdownVelocityState,
+          Date.now(),
+          state.realizedPnlUsd,
+          config.drawdownVelocityWindowMs,
+        );
+        const verdict2 = evaluateDrawdownVelocity(drawdownVelocityState, {
+          now: Date.now(),
+          windowMs: config.drawdownVelocityWindowMs,
+          maxDrawdownInWindowUsd: config.drawdownVelocityMaxUsd,
+          maxConsecutiveLosses: config.drawdownMaxConsecutiveLosses,
+          closedTradeOutcomes: recentOutcomes,
+        });
+        if (verdict2.halted) {
+          console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            event: "drawdown-halt",
+            reason: verdict2.reason,
+            cumulativePnlUsd: state.realizedPnlUsd,
+            recentOutcomes: recentOutcomes.slice(-10),
+          }));
+          await alerter.send(`drawdown halt: ${verdict2.reason}`, {
+            cumulativePnlUsd: state.realizedPnlUsd,
+          });
+          stopRequested = true;
         }
       } else if (lastExecution.orderLinkId) {
         // Limit close order placed — track for fill confirmation
@@ -1492,7 +1766,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       }
     }
 
-    if (entryAction !== "flat" && !state.position && risk.allowed && aggressiveRisk.allowed) {
+    if (entryAction !== "flat" && !state.position && risk.allowed && aggressiveRisk.allowed && !haltEntriesUntilCleared) {
       const qty = toOrderQty({
         instrument,
         notionalUsd,
@@ -1546,19 +1820,28 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           const decimals = countDecimals(instrument.priceFilter.tickSize);
           const slPrice = state.position.stopLossPrice.toFixed(decimals);
           const tpPrice = state.position.takeProfitPrice.toFixed(decimals);
-          await client.setTradingStop({
-            category: config.category,
-            symbol: activeSymbol,
-            stopLoss: slPrice,
-            takeProfit: tpPrice,
-            positionIdx: resolvePositionIdx({ side: state.position.side, positionMode: config.bybitPositionMode }),
-          }).catch((err: Error) => {
+          const ok = await trySetTradingStop({
+            client,
+            request: {
+              category: config.category,
+              symbol: activeSymbol,
+              stopLoss: slPrice,
+              takeProfit: tpPrice,
+              positionIdx: resolvePositionIdx({ side: state.position.side, positionMode: config.bybitPositionMode }),
+            },
+            retryMax: config.setTradingStopRetryMax,
+            retryDelayMs: config.setTradingStopRetryDelayMs,
+            alertHook: alerter,
+          });
+          if (!ok) {
+            // Fall back to logical exit for this position.
+            forceLogicalExitForCurrentPosition = true;
             console.log(JSON.stringify({
               ts: new Date().toISOString(),
-              event: "exchange-native-stop-failed",
-              error: err.message,
+              event: "exchange-native-stop-fallback-to-logical",
+              symbol: activeSymbol,
             }));
-          });
+          }
         }
         await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
           openPositionSymbol,
@@ -1568,7 +1851,8 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     }
 
     // ── Delayed safety stop (logical mode only) ─────────────────────────
-    if (state.position && entryTick !== null && !safetyStopPlaced && config.exitPolicyMode === "logical" && !config.paperTrading) {
+    const effectiveExitMode = forceLogicalExitForCurrentPosition ? "logical" : config.exitPolicyMode;
+    if (state.position && entryTick !== null && !safetyStopPlaced && effectiveExitMode === "logical" && !config.paperTrading) {
       const ticksSinceEntry = ticks - entryTick;
       const safetyDelayTicks = Math.ceil(config.exitPolicySafetyDelayMs / config.pollMs);
       if (ticksSinceEntry >= safetyDelayTicks) {
@@ -1577,13 +1861,17 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           : lastPrice * (1 + config.exitPolicySafetyStopBps / 10000);
         const decimals = countDecimals(instrument.priceFilter.tickSize);
         const safetyStopPriceStr = safetyStopPrice.toFixed(decimals);
-        await client.setTradingStop({
-          category: config.category,
-          symbol: activeSymbol,
-          stopLoss: safetyStopPriceStr,
-          positionIdx: resolvePositionIdx({ side: state.position.side, positionMode: config.bybitPositionMode }),
-        }).catch((err: Error) => {
-          console.log(`[safetyStop] failed: ${err.message}`);
+        await trySetTradingStop({
+          client,
+          request: {
+            category: config.category,
+            symbol: activeSymbol,
+            stopLoss: safetyStopPriceStr,
+            positionIdx: resolvePositionIdx({ side: state.position.side, positionMode: config.bybitPositionMode }),
+          },
+          retryMax: config.setTradingStopRetryMax,
+          retryDelayMs: config.setTradingStopRetryDelayMs,
+          alertHook: alerter,
         });
         console.log(JSON.stringify({
           action: "safety-stop",
@@ -1594,6 +1882,57 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           ticksSinceEntry,
         }));
         safetyStopPlaced = true;
+      }
+    }
+
+    // ── Trailing stop ────────────────────────────────────────────────────────
+    if (state.position && config.trailingStopEnabled) {
+      const trail = computeTrailingStop({
+        position: state.position,
+        marketPrice: lastPrice,
+        activationBps: config.trailingStopActivationBps,
+        trailBps: config.trailingStopTrailBps,
+      });
+      if (trail.newStopLossPrice !== null && trail.newStopLossPrice !== state.position.stopLossPrice) {
+        const oldStop = state.position.stopLossPrice;
+        const newStop = trail.newStopLossPrice;
+        const useExchangeNative =
+          !config.paperTrading
+          && config.exitPolicyMode === "exchange-native"
+          && !forceLogicalExitForCurrentPosition;
+        let applied = false;
+        if (useExchangeNative) {
+          const decimals = countDecimals(instrument.priceFilter.tickSize);
+          applied = await trySetTradingStop({
+            client,
+            request: {
+              category: config.category,
+              symbol: activeSymbol,
+              stopLoss: newStop.toFixed(decimals),
+              positionIdx: resolvePositionIdx({ side: state.position.side, positionMode: config.bybitPositionMode }),
+            },
+            retryMax: config.setTradingStopRetryMax,
+            retryDelayMs: config.setTradingStopRetryDelayMs,
+            alertHook: alerter,
+          });
+          if (!applied) {
+            forceLogicalExitForCurrentPosition = true;
+          }
+        }
+        if (applied || !useExchangeNative) {
+          state = {
+            ...state,
+            position: { ...state.position, stopLossPrice: newStop },
+          };
+          console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            event: "trailing-stop-updated",
+            symbol: activeSymbol,
+            oldStop,
+            newStop,
+            marketPrice: lastPrice,
+          }));
+        }
       }
     }
 
@@ -1672,6 +2011,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         scanNetEdgeBps: activeSetup?.netEdgeBps ?? null,
         leverage: activeLeverage,
         effectiveOrderUsd: effectiveOrderUsdPreClamp,
+        confidenceMultiplier,
         championId,
         championReason,
         walletAvailableUsd: walletSizing.walletAvailableUsd,
@@ -1736,6 +2076,10 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         quantity: state.position.quantity,
         note: "live position left open; reconcile manually before next start",
       }));
+      await alerter.send(
+        `shutdown with open position: ${openPositionSymbol} ${state.position.side} qty=${state.position.quantity}`,
+        { symbol: openPositionSymbol, side: state.position.side, quantity: state.position.quantity },
+      ).catch(() => {});
     }
     await positionLedger.close();
     releaseSessionLock();

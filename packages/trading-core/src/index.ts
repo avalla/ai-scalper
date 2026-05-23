@@ -409,6 +409,148 @@ export function evaluateAggressivePerpsRisk(params: {
   return { allowed: true };
 }
 
+// ---------- Phase 1A: Trailing stop ----------
+
+export function computeTrailingStop(params: {
+  position: OpenPosition;
+  marketPrice: number;
+  activationBps: number;
+  trailBps: number;
+}): { newStopLossPrice: number | null; reason: "below-activation" | "trailing" } {
+  const { position, marketPrice, activationBps, trailBps } = params;
+  const entry = position.entryPrice;
+
+  if (position.side === "long") {
+    const activationPrice = entry * (1 + activationBps / 10_000);
+    if (marketPrice < activationPrice) {
+      return { newStopLossPrice: null, reason: "below-activation" };
+    }
+    const candidate = marketPrice * (1 - trailBps / 10_000);
+    const newStop = Math.max(position.stopLossPrice, candidate);
+    return { newStopLossPrice: newStop, reason: "trailing" };
+  }
+
+  // short
+  const activationPrice = entry * (1 - activationBps / 10_000);
+  if (marketPrice > activationPrice) {
+    return { newStopLossPrice: null, reason: "below-activation" };
+  }
+  const candidate = marketPrice * (1 + trailBps / 10_000);
+  const newStop = Math.min(position.stopLossPrice, candidate);
+  return { newStopLossPrice: newStop, reason: "trailing" };
+}
+
+// ---------- Phase 1A: Drawdown-velocity guard ----------
+
+export interface DrawdownVelocityState {
+  recentPnlSamples: Array<{ ts: number; cumulativePnlUsd: number }>;
+}
+
+export function recordPnlSample(
+  state: DrawdownVelocityState,
+  now: number,
+  cumulativePnlUsd: number,
+  windowMs: number,
+): DrawdownVelocityState {
+  const cutoff = now - windowMs;
+  const filtered = state.recentPnlSamples.filter((s) => s.ts >= cutoff);
+  filtered.push({ ts: now, cumulativePnlUsd });
+  return { recentPnlSamples: filtered };
+}
+
+export function evaluateDrawdownVelocity(
+  state: DrawdownVelocityState,
+  params: {
+    now: number;
+    windowMs: number;
+    maxDrawdownInWindowUsd: number;
+    maxConsecutiveLosses?: number;
+    closedTradeOutcomes?: Array<"win" | "loss">;
+  },
+): { halted: boolean; reason: string | null } {
+  const cutoff = params.now - params.windowMs;
+  const inWindow = state.recentPnlSamples.filter((s) => s.ts >= cutoff);
+  if (inWindow.length > 0) {
+    const peak = Math.max(...inWindow.map((s) => s.cumulativePnlUsd));
+    const current = inWindow[inWindow.length - 1]!.cumulativePnlUsd;
+    if (peak - current > params.maxDrawdownInWindowUsd) {
+      return { halted: true, reason: "drawdown-velocity" };
+    }
+  }
+
+  if (
+    params.maxConsecutiveLosses !== undefined &&
+    params.maxConsecutiveLosses > 0 &&
+    params.closedTradeOutcomes &&
+    params.closedTradeOutcomes.length >= params.maxConsecutiveLosses
+  ) {
+    const tail = params.closedTradeOutcomes.slice(-params.maxConsecutiveLosses);
+    if (tail.every((o) => o === "loss")) {
+      return { halted: true, reason: "consecutive-losses" };
+    }
+  }
+
+  return { halted: false, reason: null };
+}
+
+// ---------- Phase 1A: Position reconciliation ----------
+
+export function reconcilePositions(params: {
+  expected: OpenPosition | null;
+  observed: { side: "Buy" | "Sell"; size: number; avgPrice: number } | null;
+  tolerance?: number;
+}): {
+  aligned: boolean;
+  drift: "missing-on-exchange" | "extra-on-exchange" | "side-mismatch" | "size-mismatch" | null;
+  details?: string;
+} {
+  const tolerance = params.tolerance ?? 1e-6;
+  const { expected, observed } = params;
+
+  if (!expected && !observed) {
+    return { aligned: true, drift: null };
+  }
+  if (expected && !observed) {
+    return { aligned: false, drift: "missing-on-exchange", details: "expected position not present on exchange" };
+  }
+  if (!expected && observed) {
+    return { aligned: false, drift: "extra-on-exchange", details: `unexpected ${observed.side} ${observed.size} on exchange` };
+  }
+  // both present
+  const expectedSide = expected!.side === "long" ? "Buy" : "Sell";
+  if (expectedSide !== observed!.side) {
+    return {
+      aligned: false,
+      drift: "side-mismatch",
+      details: `expected ${expectedSide} got ${observed!.side}`,
+    };
+  }
+  if (Math.abs(expected!.quantity - observed!.size) > tolerance) {
+    return {
+      aligned: false,
+      drift: "size-mismatch",
+      details: `expected qty ${expected!.quantity} got ${observed!.size}`,
+    };
+  }
+  return { aligned: true, drift: null };
+}
+
+// ---------- Phase 1A: Confidence-weighted sizing ----------
+
+export function applyConfidenceSizing(params: {
+  baseOrderUsd: number;
+  scanScore: number;
+  referenceScore: number;
+  minMultiplier?: number;
+  maxMultiplier?: number;
+}): { orderUsd: number; multiplier: number } {
+  const min = params.minMultiplier ?? 0.5;
+  const max = params.maxMultiplier ?? 2.0;
+  const raw = params.referenceScore > 0 ? params.scanScore / params.referenceScore : 1;
+  const multiplier = Math.min(Math.max(raw, min), max);
+  return { orderUsd: params.baseOrderUsd * multiplier, multiplier };
+}
+
 export function selectLeverageForOpportunity(params: {
   symbol: string;
   configuredLeverage: number;

@@ -40,7 +40,9 @@
     "refreshMs": 30000,
     "minSetupScore": 55,
     "minSetupNetEdgeBps": 20,
-    "candidateSymbols": []
+    "candidateSymbols": [],
+    "minOpenInterestUsd": 5000000,
+    "minListingAgeDays": 30
   },
   "tickerFailure": {
     "threshold": 2,
@@ -76,10 +78,39 @@
     "enabled": false,
     "warmupMinTrades": 5,
     "pnlWindowSize": 50,
-    "includeAggressiveVariants": true
+    "includeAggressiveVariants": true,
+    "halfLifeDays": 7
   },
   "runtime": {
     "artifactFlushTicks": 30,
     "statePersistenceEnabled": false
+  },
+  "trailingStop": {
+    "enabled": true,
+    "activationBps": 30,
+    "trailBps": 15
+  },
+  "reconcile": {
+    "intervalTicks": 20,
+    "setTradingStopRetryMax": 3,
+    "setTradingStopRetryDelayMs": 500
+  },
+  "drawdown": {
+    "velocityWindowMs": 3600000,
+    "velocityMaxUsd": 50,
+    "maxConsecutiveLosses": 4
+  },
+  "confidenceSizing": {
+    "enabled": true,
+    "minMultiplier": 0.5,
+    "maxMultiplier": 2.0
+  },
+  "alerts": {
+    "webhookUrl": ""
+  },
+  "scanGateAutoTune": {
+    "enabled": true,
+    "percentile": 75,
+    "fallbackBps": 20
   }
 }

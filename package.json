@@ -19,7 +19,8 @@
     "typecheck": "bunx tsc -b tsconfig.json",
     "typecheck:all": "bunx tsc -b tsconfig.json",
     "lint": "bunx tsc -b tsconfig.json --pretty false",
-    "test": "bun test"
+    "test": "bun test",
+    "report": "bun run --filter @ai-scalper/trader report"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

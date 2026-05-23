@@ -205,6 +205,53 @@ Cleanup enabled:
 - timestamped history output under `apps/trader/data/backtests/history/`
 - minimal candidate backtest proxy that decides `promote-to-real-backtest` or `hold`
 
+## Phase 1B features
+
+Phase 1B wires several adaptive risk + execution primitives into the trader loop.
+All default OFF; behavior with defaults is identical to Phase 1A.
+
+- **Trailing stop** (`TRAILING_STOP_ENABLED`): once price moves
+  `TRAILING_STOP_ACTIVATION_BPS` into profit, the stop trails the market by
+  `TRAILING_STOP_TRAIL_BPS`. Updates exchange-native SL when in
+  `exchange-native` mode; otherwise mutates local state for the logical-exit
+  path.
+- **Position reconciliation** (`POSITION_RECONCILE_INTERVAL_TICKS`, live only):
+  every N ticks the trader compares its local position vs Bybit and resolves
+  drift via `reconcilePositions`. `missing-on-exchange` clears local state;
+  `extra-on-exchange` halts new entries; side/size mismatch updates local
+  state from broker (ground truth).
+- **setTradingStop retry + logical fallback**
+  (`SET_TRADING_STOP_RETRY_MAX`, `SET_TRADING_STOP_RETRY_DELAY_MS`):
+  exponential-backoff retries; on permanent failure the position falls back to
+  logical exit mode and an alert is fired. retCode 110017 (hedge/one-way
+  mismatch) short-circuits — no retry.
+- **Drawdown-velocity self-shutoff** (`DRAWDOWN_VELOCITY_*`,
+  `DRAWDOWN_MAX_CONSECUTIVE_LOSSES`): rolling-window PnL drawdown OR a
+  configurable consecutive-loss streak triggers a graceful stop.
+- **Confidence-weighted sizing** (`CONFIDENCE_SIZING_ENABLED`): scales
+  `effectiveOrderUsd` by `clamp(scanScore / referenceScore, min, max)`.
+- **Bandit time-decay** (`BANDIT_HALF_LIFE_DAYS`): when > 0, old PnL samples
+  decay in the Thompson posterior so stale variants surrender champion status.
+- **Webhook alerter** (`ALERT_WEBHOOK_URL`, `ALERT_THROTTLE_MS`): best-effort
+  Discord/generic POST on drift, drawdown halt, setTradingStop final failure,
+  and shutdown-with-open-position. Throttles duplicate messages.
+- **Scan-gate auto-tune** (`SCAN_GATE_AUTO_TUNE_*`): adapts
+  `tradeMinSetupNetEdgeBps` to a percentile of recent scan history at each
+  scan refresh.
+- **Scanner extras** (`SCAN_MIN_OPEN_INTEREST_USD`, `SCAN_MIN_LISTING_AGE_DAYS`):
+  scanner floors (consumed by the market-scanner package).
+
+## Reporting
+
+```bash
+bun run report
+```
+
+Reads closed positions from the Redis position ledger (or the
+`closed-positions.jsonl` fallback) and prints aggregate stats: win rate,
+realized PnL, max drawdown, current streak, largest win/loss, avg time in
+position, and PnL by symbol / hour-of-day (UTC) / champion variant.
+
 ## Notes
 
 - default API base URL is Bybit testnet

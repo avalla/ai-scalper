@@ -74,6 +74,26 @@ export interface TraderConfig {
   metaIncludeAggressiveVariants: boolean;
   runtimeArtifactFlushTicks: number;
   statePersistenceEnabled: boolean;
+  // Phase 1A additions — populated but not yet wired into run-trader.ts.
+  trailingStopEnabled: boolean;
+  trailingStopActivationBps: number;
+  trailingStopTrailBps: number;
+  positionReconcileIntervalTicks: number;
+  setTradingStopRetryMax: number;
+  setTradingStopRetryDelayMs: number;
+  drawdownVelocityWindowMs: number;
+  drawdownVelocityMaxUsd: number;
+  drawdownMaxConsecutiveLosses: number;
+  confidenceSizingEnabled: boolean;
+  confidenceSizingMinMultiplier: number;
+  confidenceSizingMaxMultiplier: number;
+  bandit_halfLifeDays: number;
+  alertWebhookUrl: string;
+  scanGateAutoTuneEnabled: boolean;
+  scanGateAutoTunePercentile: 50 | 75 | 90;
+  scanGateAutoTuneFallbackBps: number;
+  scanMinOpenInterestUsd: number;
+  scanMinListingAgeDays: number;
 }
 
 function resolveIncludeAggressiveVariants(
@@ -192,5 +212,64 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     statePersistenceEnabled: env.STATE_PERSISTENCE_ENABLED
       ? env.STATE_PERSISTENCE_ENABLED === "true"
       : ((cfg as { runtime?: { statePersistenceEnabled?: boolean } }).runtime?.statePersistenceEnabled ?? false),
+    // ---------- Phase 1A ----------
+    trailingStopEnabled: env.TRAILING_STOP_ENABLED
+      ? env.TRAILING_STOP_ENABLED === "true"
+      : ((cfg as { trailingStop?: { enabled?: boolean } }).trailingStop?.enabled ?? false),
+    trailingStopActivationBps: env.TRAILING_STOP_ACTIVATION_BPS
+      ? Number(env.TRAILING_STOP_ACTIVATION_BPS)
+      : ((cfg as { trailingStop?: { activationBps?: number } }).trailingStop?.activationBps ?? 30),
+    trailingStopTrailBps: env.TRAILING_STOP_TRAIL_BPS
+      ? Number(env.TRAILING_STOP_TRAIL_BPS)
+      : ((cfg as { trailingStop?: { trailBps?: number } }).trailingStop?.trailBps ?? 15),
+    positionReconcileIntervalTicks: env.POSITION_RECONCILE_INTERVAL_TICKS
+      ? Number(env.POSITION_RECONCILE_INTERVAL_TICKS)
+      : ((cfg as { reconcile?: { intervalTicks?: number } }).reconcile?.intervalTicks ?? 30),
+    setTradingStopRetryMax: env.SET_TRADING_STOP_RETRY_MAX
+      ? Number(env.SET_TRADING_STOP_RETRY_MAX)
+      : ((cfg as { reconcile?: { setTradingStopRetryMax?: number } }).reconcile?.setTradingStopRetryMax ?? 3),
+    setTradingStopRetryDelayMs: env.SET_TRADING_STOP_RETRY_DELAY_MS
+      ? Number(env.SET_TRADING_STOP_RETRY_DELAY_MS)
+      : ((cfg as { reconcile?: { setTradingStopRetryDelayMs?: number } }).reconcile?.setTradingStopRetryDelayMs ?? 500),
+    drawdownVelocityWindowMs: env.DRAWDOWN_VELOCITY_WINDOW_MS
+      ? Number(env.DRAWDOWN_VELOCITY_WINDOW_MS)
+      : ((cfg as { drawdown?: { velocityWindowMs?: number } }).drawdown?.velocityWindowMs ?? 3_600_000),
+    drawdownVelocityMaxUsd: env.DRAWDOWN_VELOCITY_MAX_USD
+      ? Number(env.DRAWDOWN_VELOCITY_MAX_USD)
+      : ((cfg as { drawdown?: { velocityMaxUsd?: number } }).drawdown?.velocityMaxUsd ?? 30),
+    drawdownMaxConsecutiveLosses: env.DRAWDOWN_MAX_CONSECUTIVE_LOSSES
+      ? Number(env.DRAWDOWN_MAX_CONSECUTIVE_LOSSES)
+      : ((cfg as { drawdown?: { maxConsecutiveLosses?: number } }).drawdown?.maxConsecutiveLosses ?? 5),
+    confidenceSizingEnabled: env.CONFIDENCE_SIZING_ENABLED
+      ? env.CONFIDENCE_SIZING_ENABLED === "true"
+      : ((cfg as { confidenceSizing?: { enabled?: boolean } }).confidenceSizing?.enabled ?? false),
+    confidenceSizingMinMultiplier: env.CONFIDENCE_SIZING_MIN_MULTIPLIER
+      ? Number(env.CONFIDENCE_SIZING_MIN_MULTIPLIER)
+      : ((cfg as { confidenceSizing?: { minMultiplier?: number } }).confidenceSizing?.minMultiplier ?? 0.5),
+    confidenceSizingMaxMultiplier: env.CONFIDENCE_SIZING_MAX_MULTIPLIER
+      ? Number(env.CONFIDENCE_SIZING_MAX_MULTIPLIER)
+      : ((cfg as { confidenceSizing?: { maxMultiplier?: number } }).confidenceSizing?.maxMultiplier ?? 2.0),
+    bandit_halfLifeDays: env.BANDIT_HALF_LIFE_DAYS
+      ? Number(env.BANDIT_HALF_LIFE_DAYS)
+      : ((cfg as { meta?: { halfLifeDays?: number } }).meta?.halfLifeDays ?? 0),
+    alertWebhookUrl: env.ALERT_WEBHOOK_URL ?? ((cfg as { alerts?: { webhookUrl?: string } }).alerts?.webhookUrl ?? ""),
+    scanGateAutoTuneEnabled: env.SCAN_GATE_AUTO_TUNE_ENABLED
+      ? env.SCAN_GATE_AUTO_TUNE_ENABLED === "true"
+      : ((cfg as { scanGateAutoTune?: { enabled?: boolean } }).scanGateAutoTune?.enabled ?? false),
+    scanGateAutoTunePercentile: ((): 50 | 75 | 90 => {
+      const v = env.SCAN_GATE_AUTO_TUNE_PERCENTILE
+        ? Number(env.SCAN_GATE_AUTO_TUNE_PERCENTILE)
+        : ((cfg as { scanGateAutoTune?: { percentile?: number } }).scanGateAutoTune?.percentile ?? 75);
+      return v === 50 ? 50 : v === 90 ? 90 : 75;
+    })(),
+    scanGateAutoTuneFallbackBps: env.SCAN_GATE_AUTO_TUNE_FALLBACK_BPS
+      ? Number(env.SCAN_GATE_AUTO_TUNE_FALLBACK_BPS)
+      : ((cfg as { scanGateAutoTune?: { fallbackBps?: number } }).scanGateAutoTune?.fallbackBps ?? 15),
+    scanMinOpenInterestUsd: env.SCAN_MIN_OPEN_INTEREST_USD
+      ? Number(env.SCAN_MIN_OPEN_INTEREST_USD)
+      : ((cfg as { scanner?: { minOpenInterestUsd?: number } }).scanner?.minOpenInterestUsd ?? 0),
+    scanMinListingAgeDays: env.SCAN_MIN_LISTING_AGE_DAYS
+      ? Number(env.SCAN_MIN_LISTING_AGE_DAYS)
+      : ((cfg as { scanner?: { minListingAgeDays?: number } }).scanner?.minListingAgeDays ?? 0),
   };
 }

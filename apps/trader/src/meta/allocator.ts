@@ -13,6 +13,11 @@ export interface VariantStats {
   realizedPnlUsd: number;
   /** Last K closed-trade PnLs (FIFO, capped at allocator window size). */
   recentPnlWindow: number[];
+  /**
+   * Phase 1A: parallel FIFO window of {pnl, ts} pairs for time-decay weighting.
+   * Always tracked; only consumed when `halfLifeDays` is provided to `selectChampion`.
+   */
+  recentPnlWindowWithTs: Array<{ pnl: number; ts: number }>;
   lastUpdatedAt: number;
 }
 
@@ -20,6 +25,8 @@ export interface AllocatorState {
   stats: Record<string, VariantStats>;
   championId: string | null;
   selectedAt: number | null;
+  /** Phase 1A: monotonically incrementing cursor for strict round-robin warmup. */
+  roundRobinCursor?: number;
 }
 
 export type ChampionReason =
@@ -30,10 +37,16 @@ export type ChampionReason =
 export interface SelectChampionResult {
   championId: string;
   reason: ChampionReason;
+  /**
+   * Phase 1A: updated allocator state with advanced round-robin cursor.
+   * Existing callers may ignore this; new code should persist it to keep
+   * strict round-robin advancing across selections.
+   */
+  allocator?: AllocatorState;
 }
 
 export function emptyAllocatorState(): AllocatorState {
-  return { stats: {}, championId: null, selectedAt: null };
+  return { stats: {}, championId: null, selectedAt: null, roundRobinCursor: 0 };
 }
 
 function emptyStats(variantId: string, now: number): VariantStats {
@@ -44,6 +57,7 @@ function emptyStats(variantId: string, now: number): VariantStats {
     losses: 0,
     realizedPnlUsd: 0,
     recentPnlWindow: [],
+    recentPnlWindowWithTs: [],
     lastUpdatedAt: now,
   };
 }
@@ -67,6 +81,10 @@ export function recordClosedTrade(
   while (nextWindow.length > windowSize) {
     nextWindow.shift();
   }
+  const nextWindowWithTs = [...(existing.recentPnlWindowWithTs ?? []), { pnl: pnlUsd, ts: now }];
+  while (nextWindowWithTs.length > windowSize) {
+    nextWindowWithTs.shift();
+  }
   const updated: VariantStats = {
     variantId,
     closedTrades: existing.closedTrades + 1,
@@ -74,6 +92,7 @@ export function recordClosedTrade(
     losses: existing.losses + (pnlUsd < 0 ? 1 : 0),
     realizedPnlUsd: existing.realizedPnlUsd + pnlUsd,
     recentPnlWindow: nextWindow,
+    recentPnlWindowWithTs: nextWindowWithTs,
     lastUpdatedAt: now,
   };
   return {
@@ -129,6 +148,12 @@ export function selectChampion(params: {
   now: number;
   warmupMinTrades?: number;
   rng?: () => number;
+  /**
+   * Phase 1A: if provided (> 0), the Thompson posterior weights each closed
+   * trade's PnL by 0.5^((now - trade.ts) / halfLifeMs). Otherwise behaves
+   * exactly as before.
+   */
+  halfLifeDays?: number;
 }): SelectChampionResult {
   const { allocator, variants } = params;
   const warmupMinTrades = params.warmupMinTrades ?? 5;
@@ -138,36 +163,81 @@ export function selectChampion(params: {
     throw new Error("selectChampion requires at least one variant");
   }
   if (variants.length === 1) {
-    return { championId: variants[0]!.id, reason: "single-variant" };
+    return { championId: variants[0]!.id, reason: "single-variant", allocator };
   }
 
   const sorted = [...variants].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
-  // Warmup: pick the variant with fewest closed trades if any is under cap.
+  // Warmup: strict round-robin via cursor when any variant is under cap.
   const underWarmup = sorted.filter(
     (v) => (allocator.stats[v.id]?.closedTrades ?? 0) < warmupMinTrades,
   );
   if (underWarmup.length > 0) {
-    let pick = underWarmup[0]!;
-    let pickTrades = allocator.stats[pick.id]?.closedTrades ?? 0;
-    for (const v of underWarmup) {
-      const trades = allocator.stats[v.id]?.closedTrades ?? 0;
-      if (trades < pickTrades) {
-        pick = v;
-        pickTrades = trades;
+    const cursor = allocator.roundRobinCursor ?? 0;
+    // Map cursor into the sorted variant list, then advance to the next
+    // candidate that is still under warmup.
+    let idx = cursor % sorted.length;
+    for (let attempts = 0; attempts < sorted.length; attempts++) {
+      const candidate = sorted[idx]!;
+      if ((allocator.stats[candidate.id]?.closedTrades ?? 0) < warmupMinTrades) {
+        const updatedAllocator: AllocatorState = {
+          ...allocator,
+          roundRobinCursor: (cursor + 1) % Number.MAX_SAFE_INTEGER,
+        };
+        return {
+          championId: candidate.id,
+          reason: "warmup-rotation",
+          allocator: updatedAllocator,
+        };
       }
+      idx = (idx + 1) % sorted.length;
     }
-    return { championId: pick.id, reason: "warmup-rotation" };
+    // Fall through (should not happen since underWarmup is non-empty)
   }
 
   // All variants have ≥ warmupMinTrades closed trades → Thompson sample.
+  const halfLifeDays = params.halfLifeDays;
+  const halfLifeMs =
+    halfLifeDays !== undefined && halfLifeDays > 0 ? halfLifeDays * 24 * 60 * 60 * 1000 : null;
+
   let bestId = sorted[0]!.id;
   let bestScore = -Infinity;
   for (const v of sorted) {
-    const window = allocator.stats[v.id]?.recentPnlWindow ?? [];
-    const mu = mean(window);
-    const sigma = stddev(window);
-    const n = Math.max(window.length, 1);
+    let mu: number;
+    let sigma: number;
+    let n: number;
+
+    if (halfLifeMs !== null) {
+      const samples = allocator.stats[v.id]?.recentPnlWindowWithTs ?? [];
+      if (samples.length === 0) {
+        mu = 0;
+        sigma = 0;
+        n = 1;
+      } else {
+        const weighted = samples.map((s) => ({
+          pnl: s.pnl,
+          w: Math.pow(0.5, (params.now - s.ts) / halfLifeMs),
+        }));
+        // Use nominal sample count as the denominator so stale samples decay
+        // mu toward 0 (the "no evidence" prior) instead of preserving the raw
+        // mean when all samples are equally aged.
+        const sumWeightedPnl = weighted.reduce((a, b) => a + b.pnl * b.w, 0);
+        mu = sumWeightedPnl / weighted.length;
+        // Weighted variance about mu, also scaled by nominal count.
+        const variance =
+          weighted.length > 1
+            ? weighted.reduce((a, b) => a + b.w * (b.pnl - mu) * (b.pnl - mu), 0) / weighted.length
+            : 0;
+        sigma = Math.sqrt(Math.max(variance, 0));
+        n = Math.max(weighted.length, 1);
+      }
+    } else {
+      const window = allocator.stats[v.id]?.recentPnlWindow ?? [];
+      mu = mean(window);
+      sigma = stddev(window);
+      n = Math.max(window.length, 1);
+    }
+
     const z = sampleStandardNormal(rng);
     const score = mu + (sigma / Math.sqrt(n)) * z;
     if (score > bestScore) {
@@ -175,7 +245,7 @@ export function selectChampion(params: {
       bestId = v.id;
     }
   }
-  return { championId: bestId, reason: "thompson-sample" };
+  return { championId: bestId, reason: "thompson-sample", allocator };
 }
 
 // ---------- Persistence ----------

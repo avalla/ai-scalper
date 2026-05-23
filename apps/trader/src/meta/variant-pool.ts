@@ -7,6 +7,12 @@ export interface Variant {
   /** Human-readable label. */
   label: string;
   params: StepParams;
+  /**
+   * Phase 1A: optional whitelist of symbols this variant may trade. When set,
+   * the trader (Phase 1B) is responsible for gating selection to these symbols.
+   * The bandit/allocator does not enforce this filter — it is metadata only.
+   */
+  symbolFilter?: string[];
 }
 
 /**
@@ -131,16 +137,30 @@ export function defaultVariantPool(config: TraderConfig): Variant[] {
       },
     },
     {
-      id: "agg-100x-extreme",
-      label: "Aggressive 100x, extreme tight stops (3/12 MA, SL 6 / TP 12)",
+      id: "agg-100x-btc-only",
+      label: "Aggressive 100x BTC-only (3/12 MA, SL 10 / TP 18)",
       params: {
         ...sharedRisk,
         leverage: 100,
         fastWindow: 3,
         slowWindow: 12,
         thresholdBps: 3,
-        stopLossBps: 6,
-        takeProfitBps: 12,
+        stopLossBps: 10,
+        takeProfitBps: 18,
+      },
+      symbolFilter: ["BTCUSDT"],
+    },
+    {
+      id: "agg-50x-relaxed",
+      label: "Aggressive 50x relaxed (4/14 MA, SL 15 / TP 28)",
+      params: {
+        ...sharedRisk,
+        leverage: 50,
+        fastWindow: 4,
+        slowWindow: 14,
+        thresholdBps: 4,
+        stopLossBps: 15,
+        takeProfitBps: 28,
       },
     },
   ];

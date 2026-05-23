@@ -66,11 +66,30 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     metaPnlWindowSize: 50,
     metaIncludeAggressiveVariants: false,
     bybitPositionMode: "one-way",
+    trailingStopEnabled: false,
+    trailingStopActivationBps: 30,
+    trailingStopTrailBps: 15,
+    positionReconcileIntervalTicks: 30,
+    setTradingStopRetryMax: 3,
+    setTradingStopRetryDelayMs: 500,
+    drawdownVelocityWindowMs: 3_600_000,
+    drawdownVelocityMaxUsd: 30,
+    drawdownMaxConsecutiveLosses: 5,
+    confidenceSizingEnabled: false,
+    confidenceSizingMinMultiplier: 0.5,
+    confidenceSizingMaxMultiplier: 2.0,
+    bandit_halfLifeDays: 0,
+    alertWebhookUrl: "",
+    scanGateAutoTuneEnabled: false,
+    scanGateAutoTunePercentile: 75,
+    scanGateAutoTuneFallbackBps: 15,
+    scanMinOpenInterestUsd: 0,
+    scanMinListingAgeDays: 0,
     ...overrides,
   };
 }
 
-const AGG_IDS = ["agg-25x-tight", "agg-50x-tight", "agg-75x-very-tight", "agg-100x-extreme"];
+const AGG_IDS = ["agg-25x-tight", "agg-50x-tight", "agg-75x-very-tight", "agg-100x-btc-only", "agg-50x-relaxed"];
 
 describe("defaultVariantPool", () => {
   test("standard profile with default flag returns the 4 safe variants only", () => {
@@ -93,7 +112,7 @@ describe("defaultVariantPool", () => {
     bybitPositionMode: "one-way",
     });
     const variants = defaultVariantPool(config);
-    expect(variants).toHaveLength(8);
+    expect(variants).toHaveLength(9);
     for (const id of AGG_IDS) {
       expect(variants.find((v) => v.id === id)).toBeDefined();
     }
@@ -106,10 +125,25 @@ describe("defaultVariantPool", () => {
     bybitPositionMode: "one-way",
     });
     const variants = defaultVariantPool(config);
-    expect(variants).toHaveLength(8);
+    expect(variants).toHaveLength(9);
     for (const id of AGG_IDS) {
       expect(variants.find((v) => v.id === id)).toBeDefined();
     }
+  });
+
+  test("agg-100x-btc-only has BTCUSDT symbol filter and agg-50x-relaxed has none", () => {
+    const config = makeConfig({
+      tradingProfile: "aggressive-perps",
+      metaIncludeAggressiveVariants: true,
+      bybitPositionMode: "one-way",
+    });
+    const variants = defaultVariantPool(config);
+    const btcOnly = variants.find((v) => v.id === "agg-100x-btc-only");
+    const relaxed = variants.find((v) => v.id === "agg-50x-relaxed");
+    expect(btcOnly).toBeDefined();
+    expect(btcOnly!.symbolFilter).toEqual(["BTCUSDT"]);
+    expect(relaxed).toBeDefined();
+    expect(relaxed!.symbolFilter).toBeUndefined();
   });
 
   test("all aggressive variants have leverage > 1 and finite SL/TP", () => {
@@ -120,7 +154,7 @@ describe("defaultVariantPool", () => {
     });
     const variants = defaultVariantPool(config);
     const aggressive = variants.filter((v) => AGG_IDS.includes(v.id));
-    expect(aggressive).toHaveLength(4);
+    expect(aggressive).toHaveLength(5);
     for (const v of aggressive) {
       expect(v.params.leverage).toBeGreaterThan(1);
       expect(Number.isFinite(v.params.stopLossBps)).toBe(true);
