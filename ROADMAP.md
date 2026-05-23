@@ -10,6 +10,10 @@ State of strategies in the bot. Each can be selected via `CONFIG_FILE=config.<na
 | 1 | `funding-arb` | `config.funding-arb.json` | funding payment harvesting | ✅ Ready for live | 3 trade/day, target 70-85% WR |
 | 2 | `longer-tf` | `config.longer-tf.json` | 15m MA, fees become irrelevant | ✅ Ready for live | 1-3 trade/day |
 | 3 | `basis-arb` | `config.basis-arb.json` | spot-perp basis convergence | ✅ Ready for live, **v1** | See risks below before scaling notional |
+| 4 | `pairs-trading` | `config.pairs-trading.json` | BTC-ETH cointegration mean reversion | ✅ Ready for live | z-score gating, dollar-neutral two-leg |
+| 5 | `bollinger-adx` | `config.bollinger-adx.json` | regime-adaptive (range vs trend) | ✅ Ready for live | single-leg, 15m bars |
+| 6 | `calendar-spread` | `config.calendar-spread.json` | perp ↔ dated quarterly convergence | ✅ Ready for live, **v1** | Operator must populate `calendarSpread.datedSymbol` + `datedDeliveryAt` (Unix ms) from Bybit's listed quarterlies. Two-leg with same naked-exposure guard as basis-arb. |
+| 7 | LLM strategy advisor | any config + `ANTHROPIC_API_KEY` | meta — recommends which of the 6 strategies to run | ✅ Advisory-only **v1** | Opt-in via `ANTHROPIC_API_KEY`. Runs every `ADVISOR_INTERVAL_MINUTES` (default 30) as a separate process spawned by `start-stack`. Writes `apps/trader/data/runtime/strategy-advisor.json` + posts to `alertWebhookUrl`. Does NOT auto-switch the trader's strategy — operator decides. Prompt caching keeps cost ~$0.05-0.50/day. |
 
 ## 🚧 Next on roadmap
 
@@ -35,23 +39,20 @@ Cointegrated pair mean reversion. Track rolling z-score of `log(ETH_price / BTC_
 
 ---
 
-### #3 — Calendar spread (perp vs dated quarterly futures)
+### #3 — Calendar spread — ✅ shipped (see Shipped table row 6).
 
-Bybit lists dated quarterly contracts (e.g. `BTC-25SEP25`). They trade at different prices than the perp. The spread converges at settlement.
+Follow-ups (deferred):
+- Auto-discovery of available dated quarterlies via `instruments-info` (`contractType: "LinearFutures"`, non-zero `deliveryTime`). v1 takes the dated symbol from config.
+- Multi-quarter ladder (run several settlement legs concurrently).
 
-**Why**: Pure convergence trade, structurally similar to basis-arb but on longer horizon (weeks → months). Higher capital efficiency (no funding rate noise).
+---
 
-**Effort**: ~4h. Needs:
-- Discovery of which dated contracts exist on Bybit (instruments-info endpoint with `delivery` filter)
-- Two-leg execution: long quarterly + short perp (or vice versa)
-- Settlement-aware exit: close ~24h before quarterly settlement
-- Margin model: cross-margin between perp + quarterly
+### Auto-switch advisor (deferred follow-up to #7)
 
-**Files to create**:
-- `apps/trader/src/strategies/calendar-spread.ts` + test
-- `apps/trader/config.calendar-spread.json`
-
-**Risk**: lower frequency (1 trade per quarter ideal). Capital locked for weeks. Best for larger wallet.
+The LLM advisor in v1 is advisory-only. Future: hot-swap the trader's `strategyType` when recommendation confidence > threshold (e.g. 0.8) AND the regime has been stable for N consecutive recommendations. Requires:
+- An IPC channel from the advisor process to the trader process (Redis pub-sub or signal-driven config reload).
+- A safety interlock: never swap mid-position; wait for flat state.
+- Operator override / kill-switch.
 
 ---
 

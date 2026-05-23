@@ -66,6 +66,11 @@ import {
   type BasisPosition,
 } from "../strategies/basis-arb";
 import {
+  calendarDecide,
+  computeCalendarSpreadBps,
+  type CalendarPosition,
+} from "../strategies/calendar-spread";
+import {
   pairsDecide,
   type PairsCache,
   type PairsPosition,
@@ -646,7 +651,7 @@ function buildClosedPositionLedgerEntry(params: {
   symbol: string;
   feeRoundTripBps: number;
   championIdAtEntry?: string | null;
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread";
   basisEntryBps?: number;
   basisExitBps?: number;
   pairsLeg2Symbol?: string;
@@ -1479,6 +1484,418 @@ async function runBasisArbTick(params: {
     perpLegPnl,
     spotLegPnl,
     fundingApprox,
+    feeUsd: 2 * feePerLeg,
+    netPnl,
+  }));
+
+  return { shouldContinueLoop: true };
+}
+
+/**
+ * Calendar-spread tick: two-leg convergence trade between a linear perpetual
+ * and a dated linear quarterly futures contract on Bybit. Both legs are
+ * `category: "linear"` but with different symbols.
+ *
+ * Safety invariant matches basis-arb: perp leg goes first. If the dated leg
+ * fails after the perp filled, we IMMEDIATELY submit a compensating
+ * reduceOnly close on the perp. If compensation also fails, we emit a
+ * CRITICAL alert and do NOT record the position in state (manual reconcile
+ * required).
+ *
+ * Operator note: this v1 takes the dated symbol + delivery time from config.
+ * The operator must populate `calendarSpread.datedSymbol` and
+ * `calendarSpread.datedDeliveryAt` (Unix ms) from Bybit's listed quarterlies.
+ * If either is missing, the tick is a no-op with a structured warning.
+ */
+async function runCalendarSpreadTick(params: {
+  alerter: WebhookAlerter;
+  client: ReturnType<typeof createBybitClient>;
+  config: TraderConfig;
+  getInstrument: (symbol: string) => Promise<InstrumentInfo>;
+  observedAt: string;
+  calendarPositionRef: MutableRef<CalendarPosition | null>;
+  positionLedger: ReturnType<typeof createPositionLedger>;
+  stateRef: MutableRef<TraderState>;
+  openPositionSymbolRef: MutableRef<string | null>;
+  toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
+}): Promise<{ shouldContinueLoop: boolean }> {
+  const { config, client, stateRef, openPositionSymbolRef, calendarPositionRef } = params;
+  const perpSymbol = config.calendarPerpSymbol;
+  const datedSymbol = config.calendarDatedSymbol;
+  const datedDeliveryAt = config.calendarDatedDeliveryAt;
+
+  if (!datedSymbol || datedSymbol.trim() === "" || datedDeliveryAt <= 0) {
+    console.warn(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "calendar-spread",
+      event: "config-incomplete",
+      message: "Operator must set calendarSpread.datedSymbol and calendarSpread.datedDeliveryAt from Bybit's listed quarterlies",
+      datedSymbol,
+      datedDeliveryAt,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // Per-leg instruments.
+  let perpInstrument: InstrumentInfo;
+  let datedInstrument: InstrumentInfo;
+  try {
+    perpInstrument = await params.getInstrument(perpSymbol);
+    datedInstrument = await params.getInstrument(datedSymbol);
+  } catch (err) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "calendar-spread",
+      event: "instrument-unavailable",
+      perpSymbol,
+      datedSymbol,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // Tickers.
+  let perpTicker;
+  let datedTicker;
+  try {
+    perpTicker = await client.getTicker({ category: "linear", symbol: perpSymbol });
+  } catch (err) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "calendar-spread",
+      event: "perp-ticker-unavailable",
+      perpSymbol,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return { shouldContinueLoop: true };
+  }
+  try {
+    datedTicker = await client.getTicker({ category: "linear", symbol: datedSymbol });
+  } catch (err) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "calendar-spread",
+      event: "dated-ticker-unavailable",
+      datedSymbol,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  const perpPrice = Number(perpTicker.lastPrice);
+  const datedPrice = Number(datedTicker.lastPrice);
+  if (!Number.isFinite(perpPrice) || perpPrice <= 0 || !Number.isFinite(datedPrice) || datedPrice <= 0) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "calendar-spread",
+      event: "invalid-prices",
+      perpPrice,
+      datedPrice,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  const decision = calendarDecide({
+    perpPrice,
+    datedPrice,
+    datedDeliveryAt,
+    now: Date.now(),
+    position: calendarPositionRef.get(),
+    config: {
+      entryThresholdBps: config.calendarEntryThresholdBps,
+      exitThresholdBps: config.calendarExitThresholdBps,
+      preSettlementCloseHours: config.calendarPreSettlementCloseHours,
+    },
+  });
+
+  const currentSpreadBps = computeCalendarSpreadBps(perpPrice, datedPrice);
+
+  if (decision.kind === "hold") {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      event: "tick-calendar-spread",
+      perpSymbol,
+      datedSymbol,
+      perpPrice,
+      datedPrice,
+      spreadBps: currentSpreadBps,
+      decision: "hold",
+      reason: decision.reason,
+      position: calendarPositionRef.get(),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // ── ENTRY ────────────────────────────────────────────────────────────────
+  if (decision.kind === "enter") {
+    const notionalPerLeg = config.calendarMaxNotionalUsdPerLeg;
+    // Use perp's qtyStep for both legs (qty matched). Caller is responsible for
+    // ensuring perp + dated have compatible lot sizes for the chosen underlying.
+    const qtyStep = Number(perpInstrument.lotSizeFilter.qtyStep);
+    const minQty = Math.max(
+      Number(perpInstrument.lotSizeFilter.minOrderQty),
+      Number(datedInstrument.lotSizeFilter.minOrderQty),
+    );
+    const rawQty = notionalPerLeg / perpPrice;
+    const normalizedQty = Math.floor(rawQty / qtyStep) * qtyStep;
+    if (normalizedQty < minQty) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        strategyType: "calendar-spread",
+        event: "qty-below-min",
+        normalizedQty,
+        minQty,
+      }));
+      return { shouldContinueLoop: true };
+    }
+    const qtyStr = normalizedQty.toFixed(countDecimals(perpInstrument.lotSizeFilter.qtyStep));
+    const perpOrderSide: "Buy" | "Sell" = decision.perpSide === "long" ? "Buy" : "Sell";
+    const datedOrderSide: "Buy" | "Sell" = decision.datedSide === "long" ? "Buy" : "Sell";
+
+    if (config.paperTrading) {
+      const now = Date.now();
+      calendarPositionRef.set({
+        perpSide: decision.perpSide,
+        datedSide: decision.datedSide,
+        perpEntryPrice: perpPrice,
+        datedEntryPrice: datedPrice,
+        qty: normalizedQty,
+        entrySpreadBps: decision.spreadBps,
+        entryAt: now,
+        datedDeliveryAt,
+      });
+      openPositionSymbolRef.set(perpSymbol);
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "calendar-spread-enter-paper",
+        perpSymbol,
+        datedSymbol,
+        perpSide: decision.perpSide,
+        datedSide: decision.datedSide,
+        qty: qtyStr,
+        perpPrice,
+        datedPrice,
+        spreadBps: decision.spreadBps,
+      }));
+      return { shouldContinueLoop: true };
+    }
+
+    // ── LIVE two-leg execution ───────────────────────────────────────────
+    // Perp first, then dated. If dated fails, close perp immediately.
+    const perpReq: CreateOrderRequest = {
+      category: "linear",
+      symbol: perpSymbol,
+      side: perpOrderSide,
+      qty: qtyStr,
+      orderType: "Market",
+    };
+    let perpOrderId: string | undefined;
+    try {
+      const resp = await client.createOrder(perpReq);
+      perpOrderId = resp.orderId;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "calendar-spread-perp-leg-failed",
+        perpSymbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      await params.alerter.send(
+        `calendar-spread perp leg failed (no exposure): perpSymbol=${perpSymbol} side=${perpOrderSide} qty=${qtyStr}`,
+      ).catch(() => {});
+      return { shouldContinueLoop: true };
+    }
+
+    // Perp filled — now dated.
+    const datedReq: CreateOrderRequest = {
+      category: "linear",
+      symbol: datedSymbol,
+      side: datedOrderSide,
+      qty: qtyStr,
+      orderType: "Market",
+    };
+    try {
+      await client.createOrder(datedReq);
+    } catch (err) {
+      // Dated failed → CLOSE THE PERP LEG IMMEDIATELY (naked-exposure guard).
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "calendar-spread-dated-leg-failed-closing-perp",
+        perpSymbol,
+        datedSymbol,
+        perpOrderId,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      const compensateSide: "Buy" | "Sell" = perpOrderSide === "Buy" ? "Sell" : "Buy";
+      try {
+        await client.createOrder({
+          category: "linear",
+          symbol: perpSymbol,
+          side: compensateSide,
+          qty: qtyStr,
+          orderType: "Market",
+          reduceOnly: true,
+        });
+        await params.alerter.send(
+          `calendar-spread: dated leg failed, perp compensated — perpSymbol=${perpSymbol} closed perp leg (qty=${qtyStr}) to avoid naked exposure`,
+        ).catch(() => {});
+      } catch (compErr) {
+        await params.alerter.send(
+          `CRITICAL: calendar-spread naked exposure — manual reconcile required: perpSymbol=${perpSymbol} perpOrderId=${perpOrderId} qty=${qtyStr} compensateErr=${
+            compErr instanceof Error ? compErr.message : String(compErr)
+          }`,
+        ).catch(() => {});
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "calendar-spread-naked-exposure",
+          perpSymbol,
+          perpOrderId,
+          qty: qtyStr,
+        }));
+      }
+      return { shouldContinueLoop: true };
+    }
+
+    // Both legs filled.
+    const now = Date.now();
+    calendarPositionRef.set({
+      perpSide: decision.perpSide,
+      datedSide: decision.datedSide,
+      perpEntryPrice: perpPrice,
+      datedEntryPrice: datedPrice,
+      qty: normalizedQty,
+      entrySpreadBps: decision.spreadBps,
+      entryAt: now,
+      datedDeliveryAt,
+    });
+    openPositionSymbolRef.set(perpSymbol);
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      event: "calendar-spread-enter-live",
+      perpSymbol,
+      datedSymbol,
+      perpSide: decision.perpSide,
+      datedSide: decision.datedSide,
+      qty: qtyStr,
+      perpPrice,
+      datedPrice,
+      spreadBps: decision.spreadBps,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // ── EXIT ─────────────────────────────────────────────────────────────────
+  const pos = calendarPositionRef.get();
+  if (!pos) return { shouldContinueLoop: true };
+
+  const qtyStr = pos.qty.toFixed(countDecimals(perpInstrument.lotSizeFilter.qtyStep));
+
+  // Per-leg PnL.
+  const perpLegPnl = (pos.perpSide === "long" ? perpPrice - pos.perpEntryPrice : pos.perpEntryPrice - perpPrice) * pos.qty;
+  const datedLegPnl = (pos.datedSide === "long" ? datedPrice - pos.datedEntryPrice : pos.datedEntryPrice - datedPrice) * pos.qty;
+  const notional = pos.qty * pos.perpEntryPrice;
+  const feeRoundTripBps = config.feeRoundTripBps;
+  const feePerLeg = notional * (feeRoundTripBps / 10_000);
+  const netPnl = perpLegPnl + datedLegPnl - 2 * feePerLeg;
+
+  if (!config.paperTrading) {
+    const perpCloseSide: "Buy" | "Sell" = pos.perpSide === "long" ? "Sell" : "Buy";
+    const datedCloseSide: "Buy" | "Sell" = pos.datedSide === "long" ? "Sell" : "Buy";
+    let perpClosed = false;
+    let datedClosed = false;
+    try {
+      await client.createOrder({
+        category: "linear",
+        symbol: perpSymbol,
+        side: perpCloseSide,
+        qty: qtyStr,
+        orderType: "Market",
+        reduceOnly: true,
+      });
+      perpClosed = true;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "calendar-spread-perp-exit-failed",
+        perpSymbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    try {
+      await client.createOrder({
+        category: "linear",
+        symbol: datedSymbol,
+        side: datedCloseSide,
+        qty: qtyStr,
+        orderType: "Market",
+        reduceOnly: true,
+      });
+      datedClosed = true;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "calendar-spread-dated-exit-failed",
+        datedSymbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    if (!perpClosed || !datedClosed) {
+      await params.alerter.send(
+        `calendar-spread exit incomplete — manual reconcile: perpSymbol=${perpSymbol} datedSymbol=${datedSymbol} perpClosed=${perpClosed} datedClosed=${datedClosed} qty=${qtyStr}`,
+      ).catch(() => {});
+    }
+  }
+
+  const previousState = stateRef.get();
+  const nextState: TraderState = {
+    ...previousState,
+    realizedPnlUsd: previousState.realizedPnlUsd + netPnl,
+    lastTradeAt: Date.now(),
+    position: null,
+  };
+  stateRef.set(nextState);
+  calendarPositionRef.set(null);
+  openPositionSymbolRef.set(null);
+
+  const ledgerEntry: ClosedPositionLedgerEntry = {
+    closedAt: new Date().toISOString(),
+    cumulativeRealizedPnlUsd: nextState.realizedPnlUsd,
+    entryPrice: pos.perpEntryPrice,
+    exitPrice: perpPrice,
+    exitReason: decision.reason,
+    leverage: 1,
+    notionalUsd: notional,
+    openedAt: new Date(pos.entryAt).toISOString(),
+    quantity: pos.qty,
+    realizedPnlUsd: netPnl,
+    grossPnlUsd: perpLegPnl + datedLegPnl,
+    feeUsd: 2 * feePerLeg,
+    championIdAtEntry: null,
+    strategyType: "calendar-spread",
+    calendarDatedSymbol: datedSymbol,
+    calendarEntrySpreadBps: pos.entrySpreadBps,
+    calendarExitSpreadBps: currentSpreadBps,
+    side: pos.perpSide,
+    stopLossPrice: 0,
+    symbol: perpSymbol,
+    takeProfitPrice: 0,
+  };
+  await params.positionLedger.appendClosedPosition(ledgerEntry);
+  await params.positionLedger.syncSnapshot(params.toPersistedTraderSnapshot({
+    openPositionSymbol: null,
+    state: nextState,
+  }));
+
+  console.log(JSON.stringify({
+    ts: params.observedAt,
+    event: "calendar-spread-exit",
+    perpSymbol,
+    datedSymbol,
+    reason: decision.reason,
+    entrySpreadBps: pos.entrySpreadBps,
+    exitSpreadBps: currentSpreadBps,
+    perpLegPnl,
+    datedLegPnl,
     feeUsd: 2 * feePerLeg,
     netPnl,
   }));
@@ -2345,6 +2762,8 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     let pairsPosition: PairsPosition | null = null;
     // bollinger-adx state
     let bollingerAdxKlineCache: BollingerAdxKlineCache | null = null;
+    // calendar-spread state
+    let calendarPosition: CalendarPosition | null = null;
     let cachedRankedSetups: RankedTradeSetup[] = [];
     let lastScanAt = 0;
     let lastScanGeneratedAt: string | null = null;
@@ -2374,6 +2793,40 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       state = rolloverDailyPnlIfNeeded(state, Date.now());
 
       // ── Strategy dispatch: non-MA strategies short-circuit the MA loop. ──
+      if (config.strategyType === "calendar-spread") {
+        const handled = await runCalendarSpreadTick({
+          alerter,
+          client,
+          config,
+          getInstrument: (symbol) => getInstrument({
+            cache: instrumentCache,
+            category: "linear",
+            client,
+            symbol,
+          }),
+          observedAt,
+          calendarPositionRef: {
+            get: () => calendarPosition,
+            set: (v) => { calendarPosition = v; },
+          },
+          positionLedger,
+          stateRef: {
+            get: () => state,
+            set: (v) => { state = v; },
+          },
+          openPositionSymbolRef: {
+            get: () => openPositionSymbol,
+            set: (v) => { openPositionSymbol = v; },
+          },
+          toPersistedTraderSnapshot: (p) => toPersistedTraderSnapshot(p),
+        });
+        ticks += 1;
+        if (!handled.shouldContinueLoop) break;
+        // calendar-spread polls slowly (pollSec, default 60).
+        const calPollMs = Math.max(config.calendarPollSec * 1000, 1);
+        await sleep(calPollMs);
+        continue;
+      }
       if (config.strategyType === "basis-arb") {
         const handled = await runBasisArbTick({
           alerter,

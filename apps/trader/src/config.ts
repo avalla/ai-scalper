@@ -97,8 +97,21 @@ export interface TraderConfig {
   scanExcludedSymbols: string[];
   feeRoundTripBps: number;
   requireLocalMaConfirmation: boolean;
-  // Strategy dispatch (Phase 2+: funding-arb, longer-tf, basis-arb, pairs-trading, bollinger-adx)
-  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx";
+  // Strategy dispatch (Phase 2+: funding-arb, longer-tf, basis-arb, pairs-trading, bollinger-adx, calendar-spread)
+  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread";
+  // Calendar-spread strategy parameters (perp vs dated quarterly futures)
+  calendarPerpSymbol: string;
+  calendarDatedSymbol: string;
+  calendarDatedDeliveryAt: number;       // Unix ms timestamp of dated settlement (operator-set, fallback 0)
+  calendarEntryThresholdBps: number;
+  calendarExitThresholdBps: number;
+  calendarPreSettlementCloseHours: number;
+  calendarMaxNotionalUsdPerLeg: number;
+  calendarPollSec: number;
+  // LLM strategy advisor (opt-in via ANTHROPIC_API_KEY)
+  advisorEnabled: boolean;
+  advisorIntervalMinutes: number;
+  advisorModel: string;
   // Pairs-trading strategy parameters (cointegration mean reversion across two symbols)
   pairsLeg1Symbol: string;
   pairsLeg2Symbol: string;
@@ -335,9 +348,40 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
         || raw === "basis-arb"
         || raw === "pairs-trading"
         || raw === "bollinger-adx"
+        || raw === "calendar-spread"
       ) return raw;
       return "ma-crossover";
     })(),
+    calendarPerpSymbol: env.CALENDAR_PERP_SYMBOL
+      ?? ((cfg as { calendarSpread?: { perpSymbol?: string } }).calendarSpread?.perpSymbol ?? "BTCUSDT"),
+    calendarDatedSymbol: env.CALENDAR_DATED_SYMBOL
+      ?? ((cfg as { calendarSpread?: { datedSymbol?: string } }).calendarSpread?.datedSymbol ?? ""),
+    calendarDatedDeliveryAt: env.CALENDAR_DATED_DELIVERY_AT
+      ? Number(env.CALENDAR_DATED_DELIVERY_AT)
+      : ((cfg as { calendarSpread?: { datedDeliveryAt?: number } }).calendarSpread?.datedDeliveryAt ?? 0),
+    calendarEntryThresholdBps: env.CALENDAR_ENTRY_THRESHOLD_BPS
+      ? Number(env.CALENDAR_ENTRY_THRESHOLD_BPS)
+      : ((cfg as { calendarSpread?: { entryThresholdBps?: number } }).calendarSpread?.entryThresholdBps ?? 30),
+    calendarExitThresholdBps: env.CALENDAR_EXIT_THRESHOLD_BPS
+      ? Number(env.CALENDAR_EXIT_THRESHOLD_BPS)
+      : ((cfg as { calendarSpread?: { exitThresholdBps?: number } }).calendarSpread?.exitThresholdBps ?? 5),
+    calendarPreSettlementCloseHours: env.CALENDAR_PRE_SETTLEMENT_CLOSE_HOURS
+      ? Number(env.CALENDAR_PRE_SETTLEMENT_CLOSE_HOURS)
+      : ((cfg as { calendarSpread?: { preSettlementCloseHours?: number } }).calendarSpread?.preSettlementCloseHours ?? 24),
+    calendarMaxNotionalUsdPerLeg: env.CALENDAR_MAX_NOTIONAL_USD_PER_LEG
+      ? Number(env.CALENDAR_MAX_NOTIONAL_USD_PER_LEG)
+      : ((cfg as { calendarSpread?: { maxNotionalUsdPerLeg?: number } }).calendarSpread?.maxNotionalUsdPerLeg ?? 200),
+    calendarPollSec: env.CALENDAR_POLL_SEC
+      ? Number(env.CALENDAR_POLL_SEC)
+      : ((cfg as { calendarSpread?: { pollSec?: number } }).calendarSpread?.pollSec ?? 60),
+    advisorEnabled: env.ADVISOR_ENABLED
+      ? env.ADVISOR_ENABLED === "true"
+      : ((cfg as { advisor?: { enabled?: boolean } }).advisor?.enabled ?? false),
+    advisorIntervalMinutes: env.ADVISOR_INTERVAL_MINUTES
+      ? Number(env.ADVISOR_INTERVAL_MINUTES)
+      : ((cfg as { advisor?: { intervalMinutes?: number } }).advisor?.intervalMinutes ?? 30),
+    advisorModel: env.ADVISOR_MODEL
+      ?? ((cfg as { advisor?: { model?: string } }).advisor?.model ?? "claude-haiku-4-5-20251001"),
     basisArbEntryThresholdBps: env.BASIS_ARB_ENTRY_THRESHOLD_BPS
       ? Number(env.BASIS_ARB_ENTRY_THRESHOLD_BPS)
       : ((cfg as { basisArb?: { entryThresholdBps?: number } }).basisArb?.entryThresholdBps ?? 8),

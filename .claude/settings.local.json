@@ -6,7 +6,8 @@
       "mcp__lean-ctx__ctx_search",
       "mcp__lean-ctx__ctx_smart_read",
       "mcp__lean-ctx__ctx_tree",
-      "mcp__lean-ctx__ctx_edit"
+      "mcp__lean-ctx__ctx_edit",
+      "mcp__lean-ctx__ctx_overview"
     ]
   }
 }

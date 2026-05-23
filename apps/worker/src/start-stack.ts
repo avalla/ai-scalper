@@ -5,6 +5,13 @@ function workerAppDir(): string {
   return cwd.endsWith("/apps/worker") ? cwd : join(cwd, "apps", "worker");
 }
 
+function traderAppDir(): string {
+  const cwd = process.cwd();
+  return cwd.endsWith("/apps/worker")
+    ? join(cwd, "..", "trader")
+    : join(cwd, "apps", "trader");
+}
+
 async function main(): Promise<void> {
   const cwd = workerAppDir();
   const workerProcess = Bun.spawn({
@@ -14,6 +21,32 @@ async function main(): Promise<void> {
     stdout: "pipe",
     stderr: "inherit",
   });
+
+  // Optional: LLM strategy advisor — gated on ANTHROPIC_API_KEY.
+  let advisorProcess: ReturnType<typeof Bun.spawn> | null = null;
+  if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim() !== "") {
+    advisorProcess = Bun.spawn({
+      cmd: ["bun", "src/meta/strategy-advisor-runner-cli.ts"],
+      cwd: traderAppDir(),
+      env: process.env,
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      event: "advisor-spawned",
+      pid: advisorProcess.pid,
+    }));
+  }
+
+  const shutdownAdvisor = () => {
+    if (advisorProcess && !advisorProcess.killed) {
+      try { advisorProcess.kill("SIGTERM"); } catch { /* ignore */ }
+    }
+  };
+  process.on("SIGTERM", shutdownAdvisor);
+  process.on("SIGINT", shutdownAdvisor);
+  process.on("exit", shutdownAdvisor);
 
   const stdout = workerProcess.stdout;
   if (!stdout) {
@@ -55,6 +88,7 @@ async function main(): Promise<void> {
   }
 
   const workerExitCode = await workerProcess.exited;
+  shutdownAdvisor();
   if (workerExitCode !== 0) {
     throw new Error(`Worker exited with code ${workerExitCode}`);
   }

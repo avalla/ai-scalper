@@ -38,7 +38,7 @@ export interface ClosedPositionLedgerEntry {
   /** Bandit champion variant that was active at entry — for per-variant attribution. */
   championIdAtEntry?: string | null;
   /** Strategy that produced this trade. Optional for backward-compat with old ledger entries. */
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread";
   /** Basis (bps) at entry — present for basis-arb trades, undefined otherwise. */
   basisEntryBps?: number;
   /** Basis (bps) at exit — present for basis-arb trades, undefined otherwise. */
@@ -49,6 +49,12 @@ export interface ClosedPositionLedgerEntry {
   pairsEntryZ?: number;
   /** Pairs-trading: spread z-score at exit. */
   pairsExitZ?: number;
+  /** Calendar-spread: dated quarterly symbol (perp is recorded in `symbol`). */
+  calendarDatedSymbol?: string;
+  /** Calendar-spread: spread bps at entry. */
+  calendarEntrySpreadBps?: number;
+  /** Calendar-spread: spread bps at exit. */
+  calendarExitSpreadBps?: number;
   side: OpenPosition["side"];
   stopLossPrice: number;
   symbol: string;

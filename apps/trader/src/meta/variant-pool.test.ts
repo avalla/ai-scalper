@@ -123,6 +123,17 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     bollingerAdxTakeProfitBps: 150,
     bollingerAdxKlineInterval: "15",
     bollingerAdxKlineRefreshSec: 60,
+    calendarPerpSymbol: "BTCUSDT",
+    calendarDatedSymbol: "",
+    calendarDatedDeliveryAt: 0,
+    calendarEntryThresholdBps: 30,
+    calendarExitThresholdBps: 5,
+    calendarPreSettlementCloseHours: 24,
+    calendarMaxNotionalUsdPerLeg: 200,
+    calendarPollSec: 60,
+    advisorEnabled: false,
+    advisorIntervalMinutes: 30,
+    advisorModel: "claude-haiku-4-5-20251001",
     ...overrides,
   };
 }
