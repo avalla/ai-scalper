@@ -813,6 +813,10 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   let lastQuietLogTick = -quietHeartbeatTicks; // ensure first tick emits one
   // Per-symbol verdict tracking — log only when a candidate's accept/reject reason changes.
   const lastVerdictBySymbol: Map<string, string> = new Map();
+  // Cumulative counter of active-symbol verdicts (top-level reason only, e.g.
+  // "warmup", "scanner-no-direction", "signal-disagreement", "risk:...", "aggressive-risk:...").
+  // Logged inside the verbose tick so user can see what's gating most ticks.
+  const activeVerdictCounts: Map<string, number> = new Map();
   try {
     const persistedSnapshot = await positionLedger.loadSnapshot();
     if (persistedSnapshot) {
@@ -1755,10 +1759,15 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       return "entry-attempted";
     };
 
+    // Increment cumulative counter for the active-symbol verdict (split into category).
+    const activeVerdictRaw = computeActiveVerdict();
+    const activeVerdictCategory = activeVerdictRaw.split(":")[0] ?? activeVerdictRaw;
+    activeVerdictCounts.set(activeVerdictCategory, (activeVerdictCounts.get(activeVerdictCategory) ?? 0) + 1);
+
     for (const symbol of rankedSymbols) {
       let verdict: string;
       if (symbol === activeSymbol) {
-        verdict = `active:${computeActiveVerdict()}`;
+        verdict = `active:${activeVerdictRaw}`;
       } else if (isSymbolInTickerCooldown({ currentTick: ticks, state: symbolAvailability.get(symbol) })) {
         verdict = "ticker-cooldown";
       } else if (
@@ -2050,6 +2059,8 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         aggressiveRisk: aggRiskKey,
         position: state.position,
         mode: config.paperTrading ? "paper" : "live",
+        verdictCounts: Object.fromEntries(activeVerdictCounts),
+        totalTicks: ticks + 1,
       }));
       lastTickSignature = tickSignature;
     } else if (ticks - lastQuietLogTick >= quietHeartbeatTicks) {
