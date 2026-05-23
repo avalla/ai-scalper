@@ -25,7 +25,7 @@
     "feeRoundTripBps": 11
   },
   "llmManaged": {
-    "allowedSymbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "allowedSymbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "NEARUSDT", "ONDOUSDT", "INJUSDT", "WLDUSDT", "ADAUSDT", "AVAXUSDT", "XRPUSDT"],
     "openReviewIntervalSec": 600,
     "manageReviewIntervalSec": 180,
     "maxNotionalUsd": 20,
