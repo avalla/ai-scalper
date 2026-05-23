@@ -227,7 +227,7 @@ async function signedRequest<T>(params: {
   method: "GET" | "POST";
   path: string;
   query?: Record<string, string>;
-  body?: Record<string, string>;
+  body?: Record<string, unknown>;
 }): Promise<T> {
   const timestamp = String(Date.now());
   const query = params.query ? createQuery(params.query) : "";
@@ -335,7 +335,7 @@ export function createBybitClient(options: BybitClientOptions = {}) {
     async getWalletBalance(accountType = "UNIFIED"): Promise<unknown> {
       const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
       const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
-      return await signedRequest<unknown>({
+      const data = await signedRequest<BybitSingleResponse<unknown>>({
         apiKey,
         apiSecret,
         baseUrl,
@@ -344,13 +344,17 @@ export function createBybitClient(options: BybitClientOptions = {}) {
         path: "/v5/account/wallet-balance",
         query: { accountType },
       });
+      if (data.retCode !== 0) {
+        throw new Error(`Bybit wallet balance failed: ${data.retMsg}`);
+      }
+      return data.result;
     },
 
-    async setLeverage(request: SetLeverageRequest): Promise<void> {
+    async setLeverage(request: SetLeverageRequest): Promise<{ alreadySet: boolean }> {
       const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
       const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
 
-      await signedRequest<unknown>({
+      const data = await signedRequest<BybitSingleResponse<unknown>>({
         apiKey,
         apiSecret,
         baseUrl,
@@ -364,11 +368,26 @@ export function createBybitClient(options: BybitClientOptions = {}) {
           sellLeverage: request.sellLeverage,
         },
       });
+      if (data.retCode === 110043) {
+        return { alreadySet: true };
+      }
+      if (data.retCode !== 0) {
+        throw new Error(`Bybit set leverage failed: ${data.retMsg}`);
+      }
+      return { alreadySet: false };
     },
 
     async setTradingStop(request: SetTradingStopRequest): Promise<void> {
       const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
       const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
+
+      const body: Record<string, unknown> = {
+        category: request.category,
+        symbol: request.symbol,
+        ...(request.stopLoss !== undefined ? { stopLoss: request.stopLoss } : {}),
+        ...(request.takeProfit !== undefined ? { takeProfit: request.takeProfit } : {}),
+        ...(request.positionIdx !== undefined ? { positionIdx: request.positionIdx } : {}),
+      };
 
       await signedRequest<unknown>({
         apiKey,
@@ -377,19 +396,35 @@ export function createBybitClient(options: BybitClientOptions = {}) {
         recvWindow,
         method: "POST",
         path: "/v5/position/trading-stop",
-        body: {
-          category: request.category,
-          symbol: request.symbol,
-          stopLoss: request.stopLoss ?? "",
-          takeProfit: request.takeProfit ?? "",
-          positionIdx: String(request.positionIdx ?? 0),
-        },
+        body,
       });
     },
 
     async createOrder(request: CreateOrderRequest): Promise<CreateOrderResponse> {
       const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
       const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
+
+      const body: Record<string, unknown> = {
+        category: request.category,
+        symbol: request.symbol,
+        side: request.side,
+        qty: request.qty,
+        orderType: request.orderType,
+        ...(request.price !== undefined ? { price: request.price } : {}),
+        ...(request.reduceOnly !== undefined ? { reduceOnly: request.reduceOnly } : {}),
+        ...(request.closeOnTrigger !== undefined ? { closeOnTrigger: request.closeOnTrigger } : {}),
+        ...(request.positionIdx !== undefined ? { positionIdx: request.positionIdx } : {}),
+        ...(request.slippageToleranceType !== undefined
+          ? { slippageToleranceType: request.slippageToleranceType }
+          : {}),
+        ...(request.slippageTolerance !== undefined
+          ? { slippageTolerance: request.slippageTolerance }
+          : {}),
+        ...(request.timeInForce !== undefined ? { timeInForce: request.timeInForce } : {}),
+        ...(request.orderLinkId !== undefined ? { orderLinkId: request.orderLinkId } : {}),
+        ...(request.stopLoss !== undefined ? { stopLoss: request.stopLoss } : {}),
+        ...(request.takeProfit !== undefined ? { takeProfit: request.takeProfit } : {}),
+      };
 
       const data = await signedRequest<BybitSingleResponse<CreateOrderResponse>>({
         apiKey,
@@ -398,23 +433,7 @@ export function createBybitClient(options: BybitClientOptions = {}) {
         recvWindow,
         method: "POST",
         path: "/v5/order/create",
-        body: {
-          category: request.category,
-          symbol: request.symbol,
-          side: request.side,
-          qty: request.qty,
-          orderType: request.orderType,
-          price: request.price ?? "",
-          reduceOnly: request.reduceOnly ? "true" : "false",
-          closeOnTrigger: request.closeOnTrigger ? "true" : "false",
-          positionIdx: String(request.positionIdx ?? 0),
-          slippageToleranceType: request.slippageToleranceType ?? "",
-          slippageTolerance: request.slippageTolerance ?? "",
-          timeInForce: request.timeInForce ?? "",
-          orderLinkId: request.orderLinkId ?? "",
-          stopLoss: request.stopLoss ?? "",
-          takeProfit: request.takeProfit ?? "",
-        },
+        body,
       });
 
       if (data.retCode !== 0 || !data.result) {
@@ -438,8 +457,8 @@ export function createBybitClient(options: BybitClientOptions = {}) {
         body: {
           category: request.category,
           symbol: request.symbol,
-          orderId: request.orderId ?? "",
-          orderLinkId: request.orderLinkId ?? "",
+          ...(request.orderId !== undefined ? { orderId: request.orderId } : {}),
+          ...(request.orderLinkId !== undefined ? { orderLinkId: request.orderLinkId } : {}),
         },
       });
 
