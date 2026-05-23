@@ -47,7 +47,7 @@
     "cooldownTicks": 10
   },
   "aggressive": {
-    "allowedSymbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "NEARUSDT", "ADAUSDT", "AVAXUSDT", "MATICUSDT", "LINKUSDT", "DOTUSDT", "XRPUSDT", "ARBUSDT", "OPUSDT"],
+    "allowedSymbols": [],
     "requireScanCandidate": true,
     "scanCandidatesPath": "apps/trader/data/scan-latest.json",
     "scanLatestPath": "apps/trader/data/scan-latest.json",

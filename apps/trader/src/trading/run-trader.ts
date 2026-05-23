@@ -726,6 +726,8 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   // Tick-log throttling: emit full diagnostic only on state change or every N ticks.
   let lastTickSignature: string | null = null;
   const verboseHeartbeatTicks = Math.max(config.runtimeArtifactFlushTicks, 30);
+  // Per-symbol verdict tracking — log only when a candidate's accept/reject reason changes.
+  const lastVerdictBySymbol: Map<string, string> = new Map();
   try {
     const persistedSnapshot = await positionLedger.loadSnapshot();
     if (persistedSnapshot) {
@@ -1413,6 +1415,79 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       risk: risk.allowed ? "allowed" : risk.reason,
       spreadBps,
     });
+
+    // ── Candidate verdicts: explain why each ranked symbol is accepted or rejected.
+    // Logged only when a symbol's verdict changes, so quiet steady states stay quiet.
+    const computeActiveVerdict = (): string => {
+      if (state.position && openPositionSymbol === activeSymbol) {
+        return "position-already-open";
+      }
+      if (prices.length < config.slowWindow) {
+        return `warmup:${prices.length}/${config.slowWindow}`;
+      }
+      if (topSetupGateReason) {
+        return `top-setup-gate:${topSetupGateReason}`;
+      }
+      if (scanAction === "flat") {
+        return "scanner-no-direction";
+      }
+      if (localSignal === "flat") {
+        return `local-MA-flat:scanner=${scanAction}`;
+      }
+      if (action !== localSignal) {
+        return `signal-disagreement:scanner=${scanAction},localMA=${localSignal}`;
+      }
+      if (fundingBlocked) {
+        return `funding-blocked:${fundingRateBps.toFixed(2)}bps`;
+      }
+      if (entryAction === "flat") {
+        return "signal-flat";
+      }
+      if (!risk.allowed) {
+        return `risk:${risk.reason}`;
+      }
+      if (!aggressiveRisk.allowed) {
+        return `aggressive-risk:${(aggressiveRisk as { reason: string }).reason}`;
+      }
+      return "entry-attempted";
+    };
+
+    for (const symbol of rankedSymbols) {
+      let verdict: string;
+      if (symbol === activeSymbol) {
+        verdict = `active:${computeActiveVerdict()}`;
+      } else if (isSymbolInTickerCooldown({ currentTick: ticks, state: symbolAvailability.get(symbol) })) {
+        verdict = "ticker-cooldown";
+      } else if (
+        config.tradingProfile === "aggressive-perps"
+        && config.aggressiveAllowedSymbols.length > 0
+        && !config.aggressiveAllowedSymbols.includes(symbol)
+      ) {
+        verdict = "not-whitelisted";
+      } else if (
+        config.tradeCandidateSymbols.length > 0
+        && !config.tradeCandidateSymbols.includes(symbol)
+      ) {
+        verdict = "not-in-trade-candidates";
+      } else {
+        verdict = `ranked-not-top:active=${activeSymbol}`;
+      }
+      const previous = lastVerdictBySymbol.get(symbol);
+      if (verdict !== previous) {
+        const setup = resolvedRankedSetups.find((s) => s.symbol === symbol);
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "candidate-verdict",
+          symbol,
+          verdict,
+          previous: previous ?? null,
+          score: setup?.score ?? null,
+          netEdgeBps: setup?.netEdgeBps ?? null,
+          scanAction: setup?.action ?? null,
+        }));
+        lastVerdictBySymbol.set(symbol, verdict);
+      }
+    }
 
     if (entryAction !== "flat" && !state.position && risk.allowed && aggressiveRisk.allowed) {
       const qty = toOrderQty({
