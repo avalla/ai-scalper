@@ -77,8 +77,8 @@
     "safetyStopBps": 60
   },
   "meta": {
-    "enabled": false,
-    "warmupMinTrades": 5,
+    "enabled": true,
+    "warmupMinTrades": 3,
     "pnlWindowSize": 50,
     "includeAggressiveVariants": true,
     "halfLifeDays": 1
