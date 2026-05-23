@@ -817,6 +817,10 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   // "warmup", "scanner-no-direction", "signal-disagreement", "risk:...", "aggressive-risk:...").
   // Logged inside the verbose tick so user can see what's gating most ticks.
   const activeVerdictCounts: Map<string, number> = new Map();
+  // Drawdown-halt is a TEMPORARY pause, not a process kill. drawdownHaltUntilMs is the
+  // wall-clock the trader can resume entries. Resets recentOutcomes on resume.
+  let drawdownHaltUntilMs: number = 0;
+  const drawdownHaltCooldownMs = Number(process.env.DRAWDOWN_HALT_COOLDOWN_MS ?? String(60 * 60 * 1000)); // 1h
   try {
     const persistedSnapshot = await positionLedger.loadSnapshot();
     if (persistedSnapshot) {
@@ -1553,17 +1557,19 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           closedTradeOutcomes: recentOutcomes,
         });
         if (verdict.halted) {
+          drawdownHaltUntilMs = Date.now() + drawdownHaltCooldownMs;
           console.log(JSON.stringify({
             ts: new Date().toISOString(),
             event: "drawdown-halt",
             reason: verdict.reason,
             cumulativePnlUsd: state.realizedPnlUsd,
             recentOutcomes: recentOutcomes.slice(-10),
+            resumeAt: new Date(drawdownHaltUntilMs).toISOString(),
+            cooldownMs: drawdownHaltCooldownMs,
           }));
-          await alerter.send(`drawdown halt: ${verdict.reason}`, {
+          await alerter.send(`drawdown halt: ${verdict.reason} (resume in ${Math.round(drawdownHaltCooldownMs / 60000)}min)`, {
             cumulativePnlUsd: state.realizedPnlUsd,
           });
-          stopRequested = true;
         }
         pendingClose = null;
       } else if (isCancelledOrRejected) {
@@ -1665,17 +1671,19 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           closedTradeOutcomes: recentOutcomes,
         });
         if (verdict2.halted) {
+          drawdownHaltUntilMs = Date.now() + drawdownHaltCooldownMs;
           console.log(JSON.stringify({
             ts: new Date().toISOString(),
             event: "drawdown-halt",
             reason: verdict2.reason,
             cumulativePnlUsd: state.realizedPnlUsd,
             recentOutcomes: recentOutcomes.slice(-10),
+            resumeAt: new Date(drawdownHaltUntilMs).toISOString(),
+            cooldownMs: drawdownHaltCooldownMs,
           }));
-          await alerter.send(`drawdown halt: ${verdict2.reason}`, {
+          await alerter.send(`drawdown halt: ${verdict2.reason} (resume in ${Math.round(drawdownHaltCooldownMs / 60000)}min)`, {
             cumulativePnlUsd: state.realizedPnlUsd,
           });
-          stopRequested = true;
         }
       } else if (lastExecution.orderLinkId) {
         // Limit close order placed — track for fill confirmation
@@ -1771,6 +1779,9 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       if (haltEntriesUntilCleared) {
         return "halted-by-position-drift";
       }
+      if (Date.now() < drawdownHaltUntilMs) {
+        return "halted-by-drawdown";
+      }
       return "entry-attempted";
     };
 
@@ -1816,7 +1827,17 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       }
     }
 
-    if (entryAction !== "flat" && !state.position && risk.allowed && aggressiveRisk.allowed && !haltEntriesUntilCleared) {
+    // Auto-clear drawdown halt + reset recent outcomes once the cooldown expires.
+    if (drawdownHaltUntilMs > 0 && Date.now() >= drawdownHaltUntilMs) {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "drawdown-halt-cleared",
+        priorOutcomes: recentOutcomes.slice(-10),
+      }));
+      drawdownHaltUntilMs = 0;
+      recentOutcomes.length = 0;
+    }
+    if (entryAction !== "flat" && !state.position && risk.allowed && aggressiveRisk.allowed && !haltEntriesUntilCleared && Date.now() >= drawdownHaltUntilMs) {
       const qty = toOrderQty({
         instrument,
         notionalUsd,
