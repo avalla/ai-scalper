@@ -1,10 +1,10 @@
 {
   "tradingProfile": "aggressive-perps",
   "entry": {
-    "executionMode": "maker-preferred-with-timeout",
+    "executionMode": "maker-entry",
     "makerOffsetTicks": 1,
     "makerPollMs": 200,
-    "makerTimeoutMs": 2000
+    "makerTimeoutMs": 3000
   },
   "wallet": {
     "autoSize": false,
@@ -21,7 +21,7 @@
     "leverage": 10,
     "slippageTolerancePercent": 0.15,
     "positionMode": "one-way",
-    "feeRoundTripBps": 11
+    "feeRoundTripBps": 5
   },
   "strategy": {
     "fastWindow": 3,
@@ -43,6 +43,7 @@
     "minSetupScore": 55,
     "minSetupNetEdgeBps": 20,
     "candidateSymbols": [],
+    "excludedSymbols": ["BEATUSDT", "GENIUSUSDT", "BILLUSDT", "HYPEUSDT", "FARTCOINUSDT", "BSBUSDT"],
     "minOpenInterestUsd": 20000000,
     "minListingAgeDays": 30
   },

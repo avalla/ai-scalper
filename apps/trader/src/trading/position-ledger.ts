@@ -35,6 +35,8 @@ export interface ClosedPositionLedgerEntry {
   grossPnlUsd?: number;
   /** Round-trip fee charged on this close. Optional for backward-compat. */
   feeUsd?: number;
+  /** Bandit champion variant that was active at entry — for per-variant attribution. */
+  championIdAtEntry?: string | null;
   side: OpenPosition["side"];
   stopLossPrice: number;
   symbol: string;

@@ -24,6 +24,7 @@ export interface ScanConfig {
   scanMaxFundingBps: number;
   scanMinOpenInterestUsd?: number;
   scanMinListingAgeDays?: number;
+  scanExcludedSymbols?: string[];
 }
 
 export interface ScanArtifacts {
@@ -61,6 +62,9 @@ export function readScanConfig(env: NodeJS.ProcessEnv = process.env): ScanConfig
     scanMaxFundingBps: Number(env.SCAN_MAX_FUNDING_BPS || "10"),
     scanMinOpenInterestUsd: env.SCAN_MIN_OPEN_INTEREST_USD ? Number(env.SCAN_MIN_OPEN_INTEREST_USD) : 0,
     scanMinListingAgeDays: env.SCAN_MIN_LISTING_AGE_DAYS ? Number(env.SCAN_MIN_LISTING_AGE_DAYS) : 0,
+    scanExcludedSymbols: env.SCAN_EXCLUDED_SYMBOLS
+      ? env.SCAN_EXCLUDED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
+      : [],
   };
 }
 
@@ -259,8 +263,9 @@ export async function rankTradeSetups(config: ScanConfig): Promise<RankedTradeSe
     baseUrl: config.scanBaseUrl,
   });
   const tickers = await client.getTickers({ category: config.category });
+  const excluded = new Set(config.scanExcludedSymbols ?? []);
   const shortlist = tickers
-    .filter((ticker) => ticker.symbol.endsWith("USDT"))
+    .filter((ticker) => ticker.symbol.endsWith("USDT") && !excluded.has(ticker.symbol))
     .sort((left, right) => parseTickerNumber(right.turnover24h) - parseTickerNumber(left.turnover24h))
     .slice(0, config.scanPrefilterLimit);
 

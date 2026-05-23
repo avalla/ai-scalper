@@ -94,6 +94,7 @@ export interface TraderConfig {
   scanGateAutoTuneFallbackBps: number;
   scanMinOpenInterestUsd: number;
   scanMinListingAgeDays: number;
+  scanExcludedSymbols: string[];
   feeRoundTripBps: number;
   requireLocalMaConfirmation: boolean;
 }
@@ -273,6 +274,9 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     scanMinListingAgeDays: env.SCAN_MIN_LISTING_AGE_DAYS
       ? Number(env.SCAN_MIN_LISTING_AGE_DAYS)
       : ((cfg as { scanner?: { minListingAgeDays?: number } }).scanner?.minListingAgeDays ?? 0),
+    scanExcludedSymbols: env.SCAN_EXCLUDED_SYMBOLS
+      ? env.SCAN_EXCLUDED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
+      : ((cfg as { scanner?: { excludedSymbols?: string[] } }).scanner?.excludedSymbols ?? []),
     feeRoundTripBps: env.BYBIT_FEE_ROUND_TRIP_BPS
       ? Number(env.BYBIT_FEE_ROUND_TRIP_BPS)
       : ((cfg as { bybit?: { feeRoundTripBps?: number } }).bybit?.feeRoundTripBps ?? 0),

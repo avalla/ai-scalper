@@ -627,6 +627,7 @@ function buildClosedPositionLedgerEntry(params: {
   previousPosition: NonNullable<TraderState["position"]>;
   symbol: string;
   feeRoundTripBps: number;
+  championIdAtEntry?: string | null;
 }): ClosedPositionLedgerEntry {
   const netPnl = params.nextState.realizedPnlUsd - params.previousState.realizedPnlUsd;
   const feeUsd = params.feeRoundTripBps > 0
@@ -646,6 +647,7 @@ function buildClosedPositionLedgerEntry(params: {
     realizedPnlUsd: netPnl,
     grossPnlUsd: grossPnl,
     feeUsd,
+    championIdAtEntry: params.championIdAtEntry ?? null,
     side: params.previousPosition.side,
     stopLossPrice: params.previousPosition.stopLossPrice,
     symbol: params.symbol,
@@ -750,6 +752,17 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   const client = createBybitClient();
   const positionLedger = createPositionLedger();
   const scanConfig = readScanConfig(process.env);
+  // Plumb TraderConfig JSON fields that the scanner needs but readScanConfig
+  // only reads from env. JSON values win unless env explicitly overrode them.
+  if (config.scanMinOpenInterestUsd > 0) {
+    scanConfig.scanMinOpenInterestUsd = config.scanMinOpenInterestUsd;
+  }
+  if (config.scanMinListingAgeDays > 0) {
+    scanConfig.scanMinListingAgeDays = config.scanMinListingAgeDays;
+  }
+  if (config.scanExcludedSymbols.length > 0) {
+    scanConfig.scanExcludedSymbols = config.scanExcludedSymbols;
+  }
   const instrumentCache = new Map<string, InstrumentInfo>();
   const configuredLiveLeverageBySymbol = new Map<string, number>();
   const priceHistoryBySymbol = new Map<string, number[]>();
@@ -1504,11 +1517,12 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         safetyStopPlaced = false;
         entryTick = null;
         // Bandit reward from realized live PnL (user-decision #2).
-        if (config.metaEnabled && allocator && championIdAtEntry) {
+        const championAtClose = championIdAtEntry;
+        if (config.metaEnabled && allocator && championAtClose) {
           const pnlDelta = state.realizedPnlUsd - previousState.realizedPnlUsd;
           allocator = recordClosedTrade(
             allocator,
-            championIdAtEntry,
+            championAtClose,
             pnlDelta,
             Date.now(),
             config.metaPnlWindowSize,
@@ -1524,6 +1538,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             previousPosition,
             symbol: activeSymbol,
             feeRoundTripBps: config.feeRoundTripBps,
+            championIdAtEntry: championAtClose,
           }));
         }
         await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
@@ -1618,11 +1633,12 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         openPositionSymbol = null;
         safetyStopPlaced = false;
         entryTick = null;
-        if (config.metaEnabled && allocator && championIdAtEntry) {
+        const championAtClose2 = championIdAtEntry;
+        if (config.metaEnabled && allocator && championAtClose2) {
           const pnlDelta = state.realizedPnlUsd - previousState.realizedPnlUsd;
           allocator = recordClosedTrade(
             allocator,
-            championIdAtEntry,
+            championAtClose2,
             pnlDelta,
             Date.now(),
             config.metaPnlWindowSize,
@@ -1638,6 +1654,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             previousPosition,
             symbol: activeSymbol,
             feeRoundTripBps: config.feeRoundTripBps,
+            championIdAtEntry: championAtClose2,
           }));
         }
         await positionLedger.syncSnapshot(toPersistedTraderSnapshot({

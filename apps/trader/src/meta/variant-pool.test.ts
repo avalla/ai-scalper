@@ -85,6 +85,7 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     scanGateAutoTuneFallbackBps: 15,
     scanMinOpenInterestUsd: 0,
     scanMinListingAgeDays: 0,
+    scanExcludedSymbols: [],
     feeRoundTripBps: 0,
     requireLocalMaConfirmation: true,
     ...overrides,
