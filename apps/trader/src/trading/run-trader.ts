@@ -726,6 +726,9 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   // Tick-log throttling: emit full diagnostic only on state change or every N ticks.
   let lastTickSignature: string | null = null;
   const verboseHeartbeatTicks = Math.max(config.runtimeArtifactFlushTicks, 30);
+  // tick-quiet emitted at most once every N ticks (env QUIET_HEARTBEAT_TICKS, default 30).
+  const quietHeartbeatTicks = Math.max(1, Number(process.env.QUIET_HEARTBEAT_TICKS ?? "30"));
+  let lastQuietLogTick = -quietHeartbeatTicks; // ensure first tick emits one
   // Per-symbol verdict tracking — log only when a candidate's accept/reject reason changes.
   const lastVerdictBySymbol: Map<string, string> = new Map();
   try {
@@ -1683,8 +1686,8 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         mode: config.paperTrading ? "paper" : "live",
       }));
       lastTickSignature = tickSignature;
-    } else {
-      // Compact heartbeat: enough to confirm the bot is alive, not noisy.
+    } else if (ticks - lastQuietLogTick >= quietHeartbeatTicks) {
+      // Compact heartbeat throttled to once every quietHeartbeatTicks (default 30).
       console.log(JSON.stringify({
         ts: new Date().toISOString(),
         event: "tick-quiet",
@@ -1694,6 +1697,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         position: state.position ? state.position.side : null,
         pnl: Number(state.realizedPnlUsd.toFixed(4)),
       }));
+      lastQuietLogTick = ticks;
     }
 
     // Persist allocator state on cadence (runtimeArtifactFlushTicks).
