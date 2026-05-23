@@ -19,7 +19,8 @@
     "pollMs": 1000,
     "orderUsd": 5,
     "leverage": 3,
-    "slippageTolerancePercent": 0.1
+    "slippageTolerancePercent": 0.1,
+    "positionMode": "one-way"
   },
   "strategy": {
     "fastWindow": 5,

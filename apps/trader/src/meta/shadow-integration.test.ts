@@ -109,6 +109,7 @@ function makeConfig(): TraderConfig {
     metaWarmupMinTrades: 3,
     metaPnlWindowSize: 50,
     metaIncludeAggressiveVariants: false,
+    bybitPositionMode: "one-way",
   };
 }
 
@@ -255,6 +256,7 @@ describe("shadow integration", () => {
       aggressiveMinEstimatedLiqBufferBps: 50,
       orderUsd: 1, // keep notional small so loss-per-trade caps don't bind
       metaIncludeAggressiveVariants: true,
+    bybitPositionMode: "one-way",
       metaWarmupMinTrades: 2,
     };
     const variants: Variant[] = defaultVariantPool(config);

@@ -65,6 +65,7 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     metaWarmupMinTrades: 3,
     metaPnlWindowSize: 50,
     metaIncludeAggressiveVariants: false,
+    bybitPositionMode: "one-way",
     ...overrides,
   };
 }
@@ -76,6 +77,7 @@ describe("defaultVariantPool", () => {
     const config = makeConfig({
       tradingProfile: "standard",
       metaIncludeAggressiveVariants: false,
+    bybitPositionMode: "one-way",
     });
     const variants = defaultVariantPool(config);
     expect(variants).toHaveLength(4);
@@ -88,6 +90,7 @@ describe("defaultVariantPool", () => {
     const config = makeConfig({
       tradingProfile: "aggressive-perps",
       metaIncludeAggressiveVariants: true,
+    bybitPositionMode: "one-way",
     });
     const variants = defaultVariantPool(config);
     expect(variants).toHaveLength(8);
@@ -100,6 +103,7 @@ describe("defaultVariantPool", () => {
     const config = makeConfig({
       tradingProfile: "standard",
       metaIncludeAggressiveVariants: true,
+    bybitPositionMode: "one-way",
     });
     const variants = defaultVariantPool(config);
     expect(variants).toHaveLength(8);
@@ -112,6 +116,7 @@ describe("defaultVariantPool", () => {
     const config = makeConfig({
       tradingProfile: "aggressive-perps",
       metaIncludeAggressiveVariants: true,
+    bybitPositionMode: "one-way",
     });
     const variants = defaultVariantPool(config);
     const aggressive = variants.filter((v) => AGG_IDS.includes(v.id));

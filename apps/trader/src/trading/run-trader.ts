@@ -602,6 +602,16 @@ function sessionLockPath(): string {
   return resolveProjectPath("apps/trader/data/runtime/session.lock");
 }
 
+function resolvePositionIdx(params: {
+  side: "long" | "short";
+  positionMode: "one-way" | "hedge";
+}): 0 | 1 | 2 {
+  if (params.positionMode === "one-way") {
+    return 0;
+  }
+  return params.side === "long" ? 1 : 2;
+}
+
 function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -649,12 +659,20 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   await mkdir(resolveProjectPath("apps/trader/data/runtime"), { recursive: true });
   acquireSessionLock();
 
-  const releaseOnSignal = () => {
-    releaseSessionLock();
-    process.exit(0);
+  let stopRequested = false;
+  const onShutdownSignal = (signal: NodeJS.Signals) => {
+    if (stopRequested) {
+      return;
+    }
+    stopRequested = true;
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      event: "shutdown-signal",
+      signal,
+    }));
   };
-  process.once("SIGINT", releaseOnSignal);
-  process.once("SIGTERM", releaseOnSignal);
+  process.once("SIGINT", onShutdownSignal);
+  process.once("SIGTERM", onShutdownSignal);
 
   const client = createBybitClient();
   const positionLedger = createPositionLedger();
@@ -789,7 +807,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       }
     }
 
-    while (config.maxTicks === 0 || ticks < config.maxTicks) {
+    while ((config.maxTicks === 0 || ticks < config.maxTicks) && !stopRequested) {
       const observedAt = new Date().toISOString();
       // Daily rollover at top-of-tick — handles UTC day crossings even when idle.
       state = rolloverDailyPnlIfNeeded(state, Date.now());
@@ -1105,7 +1123,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         championClampedSymbols.add(activeSymbol);
         console.log(JSON.stringify({
           ts: new Date().toISOString(),
-          event: "champion-leverage-clamped",
+          event: "champion-orderusd-clamped",
           symbol: activeSymbol,
           championOrderUsd: championParams.orderUsd,
           walletOrderUsd: walletSizing.orderUsd,
@@ -1113,6 +1131,20 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       }
     }
     const baseLeverage = clampLeverage(effectiveLeverageRaw, instrument);
+    if (config.metaEnabled && baseLeverage < effectiveLeverageRaw) {
+      const clampKey = `lev:${activeSymbol}`;
+      if (!championClampedSymbols.has(clampKey)) {
+        championClampedSymbols.add(clampKey);
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "champion-leverage-clamped",
+          symbol: activeSymbol,
+          requestedLeverage: effectiveLeverageRaw,
+          appliedLeverage: baseLeverage,
+          instrumentMaxLeverage: Number(instrument.leverageFilter.maxLeverage),
+        }));
+      }
+    }
     const bid = toNumber(ticker.bid1Price);
     const ask = toNumber(ticker.ask1Price);
     const mid = (bid + ask) / 2;
@@ -1438,7 +1470,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             symbol: activeSymbol,
             stopLoss: slPrice,
             takeProfit: tpPrice,
-            positionIdx: state.position.side === "long" ? 1 : 2,
+            positionIdx: resolvePositionIdx({ side: state.position.side, positionMode: config.bybitPositionMode }),
           }).catch((err: Error) => {
             console.log(JSON.stringify({
               ts: new Date().toISOString(),
@@ -1468,7 +1500,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           category: config.category,
           symbol: activeSymbol,
           stopLoss: safetyStopPriceStr,
-          positionIdx: state.position.side === "long" ? 1 : 2,
+          positionIdx: resolvePositionIdx({ side: state.position.side, positionMode: config.bybitPositionMode }),
         }).catch((err: Error) => {
           console.log(`[safetyStop] failed: ${err.message}`);
         });
@@ -1600,12 +1632,24 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     await sleep(config.pollMs);
   }
   } finally {
+    process.off("SIGINT", onShutdownSignal);
+    process.off("SIGTERM", onShutdownSignal);
     if (config.metaEnabled && allocator) {
       await persistAllocatorState({
         allocator,
         variantStates: Object.fromEntries(perVariantStates.entries()),
         lastTickAt: Date.now(),
       }).catch(() => {});
+    }
+    if (stopRequested && state.position && !config.paperTrading) {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "shutdown-with-open-position",
+        symbol: openPositionSymbol,
+        side: state.position.side,
+        quantity: state.position.quantity,
+        note: "live position left open; reconcile manually before next start",
+      }));
     }
     await positionLedger.close();
     releaseSessionLock();

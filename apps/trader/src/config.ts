@@ -67,6 +67,7 @@ export interface TraderConfig {
   exitPolicyMode: "exchange-native" | "logical";
   exitPolicySafetyDelayMs: number;
   exitPolicySafetyStopBps: number;
+  bybitPositionMode: "one-way" | "hedge";
   metaEnabled: boolean;
   metaWarmupMinTrades: number;
   metaPnlWindowSize: number;
@@ -165,6 +166,12 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     exitPolicyMode: cfg.exitPolicy.mode as "exchange-native" | "logical",
     exitPolicySafetyDelayMs: cfg.exitPolicy.safetyDelayMs,
     exitPolicySafetyStopBps: cfg.exitPolicy.safetyStopBps,
+    bybitPositionMode: ((): "one-way" | "hedge" => {
+      if (env.BYBIT_POSITION_MODE === "hedge") return "hedge";
+      if (env.BYBIT_POSITION_MODE === "one-way") return "one-way";
+      const cfgMode = (cfg as { bybit?: { positionMode?: string } }).bybit?.positionMode;
+      return cfgMode === "hedge" ? "hedge" : "one-way";
+    })(),
     metaEnabled: env.META_ENABLED ? env.META_ENABLED === "true" : ((cfg as { meta?: { enabled?: boolean } }).meta?.enabled ?? false),
     metaWarmupMinTrades: env.META_WARMUP_MIN_TRADES
       ? Number(env.META_WARMUP_MIN_TRADES)
