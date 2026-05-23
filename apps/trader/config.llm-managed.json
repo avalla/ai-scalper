@@ -12,13 +12,13 @@
     "accountType": "UNIFIED",
     "coin": "USDT",
     "fraction": 1,
-    "maxOrderUsdCap": 25
+    "maxOrderUsdCap": 5
   },
   "bybit": {
     "category": "linear",
     "symbol": "BTCUSDT",
     "pollMs": 10000,
-    "orderUsd": 25,
+    "orderUsd": 5,
     "leverage": 3,
     "slippageTolerancePercent": 0.1,
     "positionMode": "one-way",
@@ -28,19 +28,19 @@
     "allowedSymbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     "openReviewIntervalSec": 600,
     "manageReviewIntervalSec": 180,
-    "maxNotionalUsd": 100,
-    "maxLeverage": 10,
-    "maxHoldHours": 24,
-    "maxAbsoluteLossUsd": 20,
-    "hedgeMaxNotionalUsd": 100,
+    "maxNotionalUsd": 20,
+    "maxLeverage": 5,
+    "maxHoldHours": 12,
+    "maxAbsoluteLossUsd": 3,
+    "hedgeMaxNotionalUsd": 15,
     "model": "claude-haiku-4-5-20251001",
     "timeoutMs": 15000,
     "postCutLossCooldownMs": 1800000
   },
   "risk": {
-    "maxPositionUsd": 500,
-    "maxDailyLossUsd": 50,
-    "maxSpreadBps": 15,
+    "maxPositionUsd": 30,
+    "maxDailyLossUsd": 5,
+    "maxSpreadBps": 10,
     "minTradeIntervalMs": 60000,
     "maxFundingRateBps": 50
   },
@@ -105,8 +105,8 @@
   },
   "drawdown": {
     "velocityWindowMs": 3600000,
-    "velocityMaxUsd": 30,
-    "maxConsecutiveLosses": 5
+    "velocityMaxUsd": 3,
+    "maxConsecutiveLosses": 3
   },
   "confidenceSizing": {
     "enabled": false,
