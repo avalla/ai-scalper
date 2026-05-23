@@ -42,6 +42,7 @@ function makeTicker(symbol: string, overrides: Partial<Record<string, string>> =
     volume24h: "10000",
     openInterestValue: "5000000",
     fundingRate: "0.0001",
+    nextFundingTime: "0",
     bid1Price: "99.95",
     ask1Price: "100.05",
     bid1Size: "1",

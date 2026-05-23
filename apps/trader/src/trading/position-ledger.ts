@@ -37,6 +37,8 @@ export interface ClosedPositionLedgerEntry {
   feeUsd?: number;
   /** Bandit champion variant that was active at entry — for per-variant attribution. */
   championIdAtEntry?: string | null;
+  /** Strategy that produced this trade. Optional for backward-compat with old ledger entries. */
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf";
   side: OpenPosition["side"];
   stopLossPrice: number;
   symbol: string;

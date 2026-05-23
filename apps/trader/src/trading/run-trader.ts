@@ -58,6 +58,8 @@ import {
   type ClosedPositionLedgerEntry,
   type PersistedTraderSnapshot,
 } from "./position-ledger";
+import { fundingArbDecide } from "../strategies/funding-arb";
+import { longerTfSignal, type LongerTfKlineCache } from "../strategies/longer-tf";
 
 function toNumber(value: string): number {
   const parsed = Number(value);
@@ -242,6 +244,7 @@ async function executeTrade(params: {
       volume24h: "0",
       openInterestValue: "0",
       fundingRate: "0",
+      nextFundingTime: "0",
       bid1Price: params.tickerBidPrice ?? params.lastPrice.toString(),
       ask1Price: params.tickerAskPrice ?? params.lastPrice.toString(),
       bid1Size: "0",
@@ -628,6 +631,7 @@ function buildClosedPositionLedgerEntry(params: {
   symbol: string;
   feeRoundTripBps: number;
   championIdAtEntry?: string | null;
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf";
 }): ClosedPositionLedgerEntry {
   const netPnl = params.nextState.realizedPnlUsd - params.previousState.realizedPnlUsd;
   const feeUsd = params.feeRoundTripBps > 0
@@ -648,6 +652,7 @@ function buildClosedPositionLedgerEntry(params: {
     grossPnlUsd: grossPnl,
     feeUsd,
     championIdAtEntry: params.championIdAtEntry ?? null,
+    strategyType: params.strategyType,
     side: params.previousPosition.side,
     stopLossPrice: params.previousPosition.stopLossPrice,
     symbol: params.symbol,
@@ -728,6 +733,321 @@ function releaseSessionLock(): void {
   } catch {
     // best effort
   }
+}
+
+interface MutableRef<T> {
+  get(): T;
+  set(value: T): void;
+}
+
+async function runAlternativeStrategyTick(params: {
+  alerter: WebhookAlerter;
+  buildClosedPositionLedgerEntry: typeof buildClosedPositionLedgerEntry;
+  client: ReturnType<typeof createBybitClient>;
+  config: TraderConfig;
+  fundingTargetRef: MutableRef<number | null>;
+  getInstrument: (symbol: string) => Promise<InstrumentInfo>;
+  longerTfKlineCacheBySymbol: Map<string, LongerTfKlineCache>;
+  observedAt: string;
+  openPositionSymbolRef: MutableRef<string | null>;
+  positionLedger: ReturnType<typeof createPositionLedger>;
+  stateRef: MutableRef<TraderState>;
+  toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
+}): Promise<{ shouldContinueLoop: boolean }> {
+  const { config, client, stateRef, openPositionSymbolRef, fundingTargetRef } = params;
+  const activeSymbol = params.config.tradeCandidateSymbols[0] ?? params.config.symbol;
+
+  let instrument: InstrumentInfo;
+  try {
+    instrument = await params.getInstrument(activeSymbol);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: config.strategyType,
+      symbol: activeSymbol,
+      event: "instrument-unavailable",
+      error: msg,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  let ticker;
+  try {
+    ticker = await client.getTicker({ category: config.category, symbol: activeSymbol });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: config.strategyType,
+      symbol: activeSymbol,
+      event: "ticker-unavailable",
+      error: msg,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  const lastPrice = Number(ticker.lastPrice);
+  const markPrice = Number(ticker.markPrice);
+  const bid = Number(ticker.bid1Price);
+  const ask = Number(ticker.ask1Price);
+  const mid = (bid + ask) / 2;
+  const spreadBps = mid > 0 ? ((ask - bid) / mid) * 10_000 : 0;
+  const fundingRateBps = Number(ticker.fundingRate) * 10_000;
+  const state = stateRef.get();
+
+  // Decide action.
+  let entryAction: "long" | "short" | null = null;
+  let exitRequested = false;
+  let decisionReason = "";
+  let leverageForEntry = config.leverage;
+  let orderUsdForEntry = config.orderUsd;
+  let stopLossBpsForEntry = config.stopLossBps;
+  let takeProfitBpsForEntry = config.takeProfitBps;
+  let fundingTimeTargetForEntry: number | null = null;
+
+  if (config.strategyType === "funding-arb") {
+    const nextFundingTime = Number(ticker.nextFundingTime);
+    const decision = fundingArbDecide({
+      fundingRateBps,
+      nextFundingTime: Number.isFinite(nextFundingTime) ? nextFundingTime : 0,
+      now: Date.now(),
+      symbol: activeSymbol,
+      hasOpenPosition: state.position !== null && openPositionSymbolRef.get() === activeSymbol,
+      openPositionEnteredForFundingTime: fundingTargetRef.get() ?? undefined,
+      config: {
+        minAbsRateBps: config.fundingArbMinAbsRateBps,
+        entryWindowMinutesBefore: config.fundingArbEntryWindowMinutesBefore,
+        exitDelayMinutesAfter: config.fundingArbExitDelayMinutesAfter,
+      },
+    });
+    decisionReason = decision.reason;
+    if (decision.kind === "enter") {
+      entryAction = decision.side;
+      fundingTimeTargetForEntry = decision.fundingTimeTarget;
+      leverageForEntry = config.fundingArbMaxLeverage;
+      orderUsdForEntry = Math.min(config.orderUsd, config.fundingArbMaxNotionalUsd / Math.max(1, leverageForEntry));
+    } else if (decision.kind === "exit") {
+      exitRequested = true;
+    }
+  } else {
+    // longer-tf
+    let cache = params.longerTfKlineCacheBySymbol.get(activeSymbol) ?? null;
+    let sig = longerTfSignal({
+      cache,
+      now: Date.now(),
+      refreshSec: config.longerTfKlineRefreshSec,
+      symbol: activeSymbol,
+      fastWindow: config.longerTfFastWindow,
+      slowWindow: config.longerTfSlowWindow,
+      thresholdBps: config.longerTfThresholdBps,
+    });
+    if (sig === "needs-refresh") {
+      try {
+        const klines = await client.getKlines({
+          category: config.category,
+          symbol: activeSymbol,
+          interval: config.longerTfKlineInterval,
+          limit: config.longerTfSlowWindow + 5,
+        });
+        // Bybit returns newest first; reverse for oldest-first MA series.
+        const closePrices = klines.map((k) => Number(k.closePrice)).reverse();
+        cache = { symbol: activeSymbol, fetchedAt: Date.now(), closePrices };
+        params.longerTfKlineCacheBySymbol.set(activeSymbol, cache);
+        sig = longerTfSignal({
+          cache,
+          now: Date.now(),
+          refreshSec: config.longerTfKlineRefreshSec,
+          symbol: activeSymbol,
+          fastWindow: config.longerTfFastWindow,
+          slowWindow: config.longerTfSlowWindow,
+          thresholdBps: config.longerTfThresholdBps,
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          ts: params.observedAt,
+          strategyType: config.strategyType,
+          symbol: activeSymbol,
+          event: "klines-fetch-failed",
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        return { shouldContinueLoop: true };
+      }
+    }
+    decisionReason = `longer-tf:${sig}`;
+    leverageForEntry = config.leverage;
+    orderUsdForEntry = config.orderUsd;
+    stopLossBpsForEntry = config.longerTfStopLossBps;
+    takeProfitBpsForEntry = config.longerTfTakeProfitBps;
+
+    // Check exit conditions if we have an open position.
+    const hasPos = state.position !== null && openPositionSymbolRef.get() === activeSymbol;
+    if (hasPos) {
+      const exitReason = getExitReason({
+        marketPrice: lastPrice,
+        signal: sig === "long" || sig === "short" || sig === "flat" ? sig : "flat",
+        state,
+      });
+      if (exitReason) {
+        exitRequested = true;
+        decisionReason = `longer-tf-exit:${exitReason}`;
+      }
+    } else if (sig === "long" || sig === "short") {
+      entryAction = sig;
+    }
+  }
+
+  // ── EXIT path ────────────────────────────────────────────────────────────
+  if (exitRequested && state.position && openPositionSymbolRef.get() === activeSymbol) {
+    const closeAction: "long" | "short" = state.position.side === "long" ? "short" : "long";
+    const closeQty = state.position.quantity.toFixed(countDecimals(instrument.lotSizeFilter.qtyStep));
+    const exec = await executeTrade({
+      action: closeAction,
+      client,
+      config,
+      instrument,
+      lastPrice,
+      symbol: activeSymbol,
+      tickerBidPrice: ticker.bid1Price,
+      tickerAskPrice: ticker.ask1Price,
+      qty: closeQty,
+      reduceOnly: true,
+    });
+    if (exec.filled) {
+      const previousState = state;
+      const previousPosition = state.position;
+      const newState = updatePaperState({
+        action: closeAction,
+        leverage: state.position.leverage,
+        notionalUsd: state.position.notionalUsd,
+        price: exec.fillPrice,
+        previous: state,
+        now: Date.now(),
+        stopLossBps: stopLossBpsForEntry,
+        takeProfitBps: takeProfitBpsForEntry,
+        reduceOnly: true,
+        feeRoundTripBps: config.feeRoundTripBps,
+      });
+      stateRef.set(newState);
+      openPositionSymbolRef.set(null);
+      fundingTargetRef.set(null);
+      await params.positionLedger.appendClosedPosition(params.buildClosedPositionLedgerEntry({
+        exitPrice: exec.fillPrice,
+        exitReason: decisionReason,
+        nextState: newState,
+        previousState,
+        previousPosition,
+        symbol: activeSymbol,
+        feeRoundTripBps: config.feeRoundTripBps,
+        championIdAtEntry: null,
+        strategyType: config.strategyType,
+      }));
+      await params.positionLedger.syncSnapshot(params.toPersistedTraderSnapshot({
+        openPositionSymbol: null,
+        state: newState,
+      }));
+    }
+  }
+
+  // ── ENTRY path ───────────────────────────────────────────────────────────
+  if (entryAction && !state.position) {
+    const notionalUsd = orderUsdForEntry * leverageForEntry;
+    const risk = evaluateRisk({
+      action: entryAction,
+      limits: {
+        maxPositionUsd: config.maxPositionUsd,
+        maxDailyLossUsd: config.maxDailyLossUsd,
+        minTradeIntervalMs: config.minTradeIntervalMs,
+        maxSpreadBps: config.maxSpreadBps,
+      },
+      market: { lastPrice, markPrice },
+      now: Date.now(),
+      orderUsd: notionalUsd,
+      state,
+    });
+    if (!risk.allowed) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        strategyType: config.strategyType,
+        symbol: activeSymbol,
+        event: "entry-blocked-by-risk",
+        reason: risk.reason,
+        fundingRateBps,
+        spreadBps,
+      }));
+      return { shouldContinueLoop: true };
+    }
+    const minLeverage = Number(instrument.leverageFilter.minLeverage);
+    const maxLeverage = Number(instrument.leverageFilter.maxLeverage);
+    const clampedLeverage = Math.min(Math.max(leverageForEntry, minLeverage), maxLeverage);
+    const qtyStep = Number(instrument.lotSizeFilter.qtyStep);
+    const rawQty = notionalUsd / lastPrice;
+    const normalizedQty = Math.floor(rawQty / qtyStep) * qtyStep;
+    const minQty = Number(instrument.lotSizeFilter.minOrderQty);
+    if (normalizedQty < minQty) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        strategyType: config.strategyType,
+        symbol: activeSymbol,
+        event: "qty-below-min",
+        normalizedQty,
+        minQty,
+      }));
+      return { shouldContinueLoop: true };
+    }
+    const qty = normalizedQty.toFixed(countDecimals(instrument.lotSizeFilter.qtyStep));
+    const exec = await executeTrade({
+      action: entryAction,
+      client,
+      config,
+      instrument,
+      lastPrice,
+      symbol: activeSymbol,
+      tickerBidPrice: ticker.bid1Price,
+      tickerAskPrice: ticker.ask1Price,
+      qty,
+    });
+    if (exec.filled) {
+      const newState = updatePaperState({
+        action: entryAction,
+        leverage: clampedLeverage,
+        notionalUsd,
+        price: exec.fillPrice,
+        previous: state,
+        now: Date.now(),
+        stopLossBps: stopLossBpsForEntry,
+        takeProfitBps: takeProfitBpsForEntry,
+      });
+      stateRef.set(newState);
+      openPositionSymbolRef.set(activeSymbol);
+      if (config.strategyType === "funding-arb" && fundingTimeTargetForEntry !== null) {
+        fundingTargetRef.set(fundingTimeTargetForEntry);
+      }
+      await params.positionLedger.syncSnapshot(params.toPersistedTraderSnapshot({
+        openPositionSymbol: activeSymbol,
+        state: newState,
+      }));
+    }
+  }
+
+  // Heartbeat log.
+  console.log(JSON.stringify({
+    ts: params.observedAt,
+    event: "tick-alt-strategy",
+    strategyType: config.strategyType,
+    symbol: activeSymbol,
+    lastPrice,
+    fundingRateBps,
+    spreadBps,
+    decisionReason,
+    entryAction,
+    exitRequested,
+    position: stateRef.get().position,
+    realizedPnlUsd: stateRef.get().realizedPnlUsd,
+    fundingTimeTarget: fundingTargetRef.get(),
+  }));
+
+  return { shouldContinueLoop: true };
 }
 
 export async function runTrader(config: TraderConfig): Promise<void> {
@@ -895,12 +1215,15 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       reason: config.paperTrading ? "paper-trading" : "wallet-fallback-config",
       walletAvailableUsd: null as number | null,
     };
+    // ── Phase-2 strategy state ──────────────────────────────────────────────
+    let fundingTargetForOpenPosition: number | null = null;
+    const longerTfKlineCacheBySymbol: Map<string, LongerTfKlineCache> = new Map();
     let cachedRankedSetups: RankedTradeSetup[] = [];
     let lastScanAt = 0;
     let lastScanGeneratedAt: string | null = null;
 
-    // ── Meta-bandit setup (only when META_ENABLED) ──────────────────────────
-    if (config.metaEnabled) {
+    // ── Meta-bandit setup (only when META_ENABLED and strategyType=ma-crossover) ──
+    if (config.metaEnabled && config.strategyType === "ma-crossover") {
       pool = defaultVariantPool(config);
       const persisted = await loadAllocatorState();
       if (persisted) {
@@ -922,6 +1245,45 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       const observedAt = new Date().toISOString();
       // Daily rollover at top-of-tick — handles UTC day crossings even when idle.
       state = rolloverDailyPnlIfNeeded(state, Date.now());
+
+      // ── Strategy dispatch: non-MA strategies short-circuit the MA loop. ──
+      if (config.strategyType === "funding-arb" || config.strategyType === "longer-tf") {
+        const handled = await runAlternativeStrategyTick({
+          alerter,
+          buildClosedPositionLedgerEntry,
+          client,
+          config,
+          fundingTargetRef: {
+            get: () => fundingTargetForOpenPosition,
+            set: (v) => { fundingTargetForOpenPosition = v; },
+          },
+          getInstrument: (symbol) => getInstrument({
+            cache: instrumentCache,
+            category: config.category,
+            client,
+            symbol,
+          }),
+          longerTfKlineCacheBySymbol,
+          observedAt,
+          openPositionSymbolRef: {
+            get: () => openPositionSymbol,
+            set: (v) => { openPositionSymbol = v; },
+          },
+          positionLedger,
+          stateRef: {
+            get: () => state,
+            set: (v) => { state = v; },
+          },
+          toPersistedTraderSnapshot: (p) => toPersistedTraderSnapshot(p),
+        });
+        ticks += 1;
+        if (!handled.shouldContinueLoop) {
+          break;
+        }
+        await sleep(config.pollMs);
+        continue;
+      }
+
       if ((Date.now() - lastScanAt) >= config.tradeScanRefreshMs || cachedRankedSetups.length === 0) {
         cachedRankedSetups = await rankTradeSetups(scanConfig);
         lastScanAt = Date.now();
@@ -1216,7 +1578,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       leverage: config.leverage,
       orderUsd: config.orderUsd,
     };
-    if (config.metaEnabled && allocator && pool.length > 0) {
+    if (config.metaEnabled && config.strategyType === "ma-crossover" && allocator && pool.length > 0) {
       const eligibleVariants = pool.filter(
         (v) => !v.symbolFilter || v.symbolFilter.includes(activeSymbol),
       );
@@ -1539,6 +1901,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             symbol: activeSymbol,
             feeRoundTripBps: config.feeRoundTripBps,
             championIdAtEntry: championAtClose,
+            strategyType: config.strategyType,
           }));
         }
         await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
@@ -1655,6 +2018,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             symbol: activeSymbol,
             feeRoundTripBps: config.feeRoundTripBps,
             championIdAtEntry: championAtClose2,
+            strategyType: config.strategyType,
           }));
         }
         await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
@@ -2152,7 +2516,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   } finally {
     process.off("SIGINT", onShutdownSignal);
     process.off("SIGTERM", onShutdownSignal);
-    if (config.metaEnabled && allocator) {
+    if (config.metaEnabled && config.strategyType === "ma-crossover" && allocator) {
       await persistAllocatorState({
         allocator,
         variantStates: Object.fromEntries(perVariantStates.entries()),

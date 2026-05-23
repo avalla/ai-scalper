@@ -15,12 +15,14 @@ import {
 // as an optional extension so the report still groups it when added later.
 export type ReportEntry = ClosedPositionLedgerEntry & {
   championIdAtEntry?: string;
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf";
 };
 
 export interface ReportBuckets {
   byVariant: Record<string, { trades: number; pnl: number }>;
   bySymbol: Record<string, { trades: number; pnl: number }>;
   byHour: Record<string, { trades: number; pnl: number }>;
+  byStrategy: Record<string, { trades: number; pnl: number }>;
 }
 
 export interface ReportResult {
@@ -60,7 +62,7 @@ export function computeReport(entries: ReportEntry[]): ReportResult {
       pnlMean: 0,
       pnlStddev: 0,
       sharpeAnnualizedScalp: 0,
-      buckets: { byVariant: {}, bySymbol: {}, byHour: {} },
+      buckets: { byVariant: {}, bySymbol: {}, byHour: {}, byStrategy: {} },
     };
   }
 
@@ -86,6 +88,7 @@ export function computeReport(entries: ReportEntry[]): ReportResult {
   const byVariant: ReportBuckets["byVariant"] = {};
   const bySymbol: ReportBuckets["bySymbol"] = {};
   const byHour: ReportBuckets["byHour"] = {};
+  const byStrategy: ReportBuckets["byStrategy"] = {};
 
   for (const entry of sorted) {
     const pnl = entry.realizedPnlUsd;
@@ -112,11 +115,19 @@ export function computeReport(entries: ReportEntry[]): ReportResult {
       totalTimeInPositionMs += closedTs - openedTs;
     }
 
-    const variantKey = entry.championIdAtEntry ?? "single";
+    // If no champion (non-MA strategies bypass the bandit), bucket the
+    // variant by strategyType so the byVariant report still shows attribution.
+    const variantKey = entry.championIdAtEntry ?? entry.strategyType ?? "single";
     const v = byVariant[variantKey] ?? { trades: 0, pnl: 0 };
     v.trades += 1;
     v.pnl += pnl;
     byVariant[variantKey] = v;
+
+    const strategyKey = entry.strategyType ?? "ma-crossover";
+    const st = byStrategy[strategyKey] ?? { trades: 0, pnl: 0 };
+    st.trades += 1;
+    st.pnl += pnl;
+    byStrategy[strategyKey] = st;
 
     const s = bySymbol[entry.symbol] ?? { trades: 0, pnl: 0 };
     s.trades += 1;
@@ -179,7 +190,7 @@ export function computeReport(entries: ReportEntry[]): ReportResult {
     pnlMean,
     pnlStddev,
     sharpeAnnualizedScalp,
-    buckets: { byVariant, bySymbol, byHour },
+    buckets: { byVariant, bySymbol, byHour, byStrategy },
   };
 }
 
@@ -235,6 +246,7 @@ export function printReport(report: ReportResult): void {
   console.log(`Sharpe (scalp×252h) : ${report.sharpeAnnualizedScalp.toFixed(3)}`);
 
   printBucket("PnL by champion variant", report.buckets.byVariant, "variant");
+  printBucket("PnL by strategy", report.buckets.byStrategy, "strategy");
   printBucket("PnL by symbol", report.buckets.bySymbol, "symbol");
   printBucket("PnL by hour (UTC)", report.buckets.byHour, "hour");
   console.log("─────────────────────────────────────────────────────────");

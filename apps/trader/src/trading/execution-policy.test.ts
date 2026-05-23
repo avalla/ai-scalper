@@ -34,6 +34,7 @@ const ticker = {
   volume24h: "10000",
   openInterestValue: "500000000",
   fundingRate: "0.0001",
+  nextFundingTime: "0",
   bid1Price: "69999.8",
   ask1Price: "70000.0",
   bid1Size: "10",

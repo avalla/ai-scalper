@@ -39,6 +39,7 @@ function makeTicker(lastPrice: number, markPrice = lastPrice): MarketTicker {
     volume24h: "0",
     openInterestValue: "0",
     fundingRate: "0",
+    nextFundingTime: "0",
     bid1Price: lastPrice.toString(),
     ask1Price: lastPrice.toString(),
     bid1Size: "0",
@@ -132,6 +133,19 @@ function makeConfig(): TraderConfig {
     scanExcludedSymbols: [],
     feeRoundTripBps: 0,
     requireLocalMaConfirmation: true,
+    strategyType: "ma-crossover",
+    fundingArbMinAbsRateBps: 5,
+    fundingArbEntryWindowMinutesBefore: 5,
+    fundingArbExitDelayMinutesAfter: 2,
+    fundingArbMaxLeverage: 5,
+    fundingArbMaxNotionalUsd: 100,
+    longerTfKlineInterval: "15",
+    longerTfKlineRefreshSec: 60,
+    longerTfFastWindow: 6,
+    longerTfSlowWindow: 20,
+    longerTfThresholdBps: 20,
+    longerTfStopLossBps: 50,
+    longerTfTakeProfitBps: 150,
   };
 }
 

@@ -18,6 +18,7 @@ function makeEntry(opts: Partial<ReportEntry> & { realizedPnlUsd: number; closed
     symbol: opts.symbol ?? "BTCUSDT",
     takeProfitPrice: opts.takeProfitPrice ?? 101,
     championIdAtEntry: opts.championIdAtEntry,
+    strategyType: opts.strategyType,
   };
 }
 
@@ -62,5 +63,32 @@ describe("computeReport", () => {
 
     // Max drawdown: cumulative 5, 2, 9, 11 → peak after first = 5, drop to 2 = dd 3.
     expect(r.maxDrawdown).toBeCloseTo(3, 5);
+  });
+
+  it("buckets by strategyType when present, defaulting to ma-crossover otherwise", () => {
+    const entries: ReportEntry[] = [
+      makeEntry({ realizedPnlUsd: 3, closedAt: "2026-05-23T10:00:00Z", strategyType: "funding-arb" }),
+      makeEntry({ realizedPnlUsd: -1, closedAt: "2026-05-23T11:00:00Z", strategyType: "funding-arb" }),
+      makeEntry({ realizedPnlUsd: 4, closedAt: "2026-05-23T12:00:00Z", strategyType: "longer-tf" }),
+      // No strategyType => defaults to ma-crossover
+      makeEntry({ realizedPnlUsd: 2, closedAt: "2026-05-23T13:00:00Z", championIdAtEntry: "ma-5-20-th4" }),
+    ];
+    const r = computeReport(entries);
+    expect(r.buckets.byStrategy["funding-arb"]?.trades).toBe(2);
+    expect(r.buckets.byStrategy["funding-arb"]?.pnl).toBeCloseTo(2, 5);
+    expect(r.buckets.byStrategy["longer-tf"]?.trades).toBe(1);
+    expect(r.buckets.byStrategy["ma-crossover"]?.trades).toBe(1);
+  });
+
+  it("falls back variant bucket to strategyType when championIdAtEntry is null", () => {
+    const entries: ReportEntry[] = [
+      makeEntry({ realizedPnlUsd: 5, closedAt: "2026-05-23T10:00:00Z", strategyType: "funding-arb" }),
+      makeEntry({ realizedPnlUsd: -2, closedAt: "2026-05-23T11:00:00Z", strategyType: "longer-tf" }),
+    ];
+    const r = computeReport(entries);
+    expect(r.buckets.byVariant["funding-arb"]?.trades).toBe(1);
+    expect(r.buckets.byVariant["funding-arb"]?.pnl).toBeCloseTo(5, 5);
+    expect(r.buckets.byVariant["longer-tf"]?.trades).toBe(1);
+    expect(r.buckets.byVariant["single"]).toBeUndefined();
   });
 });

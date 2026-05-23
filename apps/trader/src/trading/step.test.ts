@@ -30,6 +30,7 @@ function makeTicker(lastPrice: number, markPrice = lastPrice): MarketTicker {
     volume24h: "0",
     openInterestValue: "0",
     fundingRate: "0",
+    nextFundingTime: "0",
     bid1Price: lastPrice.toString(),
     ask1Price: lastPrice.toString(),
     bid1Size: "0",

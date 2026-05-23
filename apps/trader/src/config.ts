@@ -97,6 +97,22 @@ export interface TraderConfig {
   scanExcludedSymbols: string[];
   feeRoundTripBps: number;
   requireLocalMaConfirmation: boolean;
+  // Strategy dispatch (Phase 2+: funding-arb and longer-tf strategies)
+  strategyType: "ma-crossover" | "funding-arb" | "longer-tf";
+  // Funding-rate arbitrage strategy parameters
+  fundingArbMinAbsRateBps: number;
+  fundingArbEntryWindowMinutesBefore: number;
+  fundingArbExitDelayMinutesAfter: number;
+  fundingArbMaxLeverage: number;
+  fundingArbMaxNotionalUsd: number;
+  // Longer-timeframe MA strategy parameters
+  longerTfKlineInterval: string;
+  longerTfKlineRefreshSec: number;
+  longerTfFastWindow: number;
+  longerTfSlowWindow: number;
+  longerTfThresholdBps: number;
+  longerTfStopLossBps: number;
+  longerTfTakeProfitBps: number;
 }
 
 function resolveIncludeAggressiveVariants(
@@ -283,5 +299,47 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     requireLocalMaConfirmation: env.REQUIRE_LOCAL_MA_CONFIRMATION
       ? env.REQUIRE_LOCAL_MA_CONFIRMATION === "true"
       : ((cfg as { strategy?: { requireLocalMaConfirmation?: boolean } }).strategy?.requireLocalMaConfirmation ?? true),
+    strategyType: ((): TraderConfig["strategyType"] => {
+      const raw = env.STRATEGY_TYPE
+        ?? (cfg as { strategy?: { type?: string } }).strategy?.type
+        ?? "ma-crossover";
+      if (raw === "funding-arb" || raw === "longer-tf" || raw === "ma-crossover") return raw;
+      return "ma-crossover";
+    })(),
+    fundingArbMinAbsRateBps: env.FUNDING_ARB_MIN_ABS_RATE_BPS
+      ? Number(env.FUNDING_ARB_MIN_ABS_RATE_BPS)
+      : ((cfg as { fundingArb?: { minAbsRateBps?: number } }).fundingArb?.minAbsRateBps ?? 5),
+    fundingArbEntryWindowMinutesBefore: env.FUNDING_ARB_ENTRY_WINDOW_MINUTES_BEFORE
+      ? Number(env.FUNDING_ARB_ENTRY_WINDOW_MINUTES_BEFORE)
+      : ((cfg as { fundingArb?: { entryWindowMinutesBefore?: number } }).fundingArb?.entryWindowMinutesBefore ?? 5),
+    fundingArbExitDelayMinutesAfter: env.FUNDING_ARB_EXIT_DELAY_MINUTES_AFTER
+      ? Number(env.FUNDING_ARB_EXIT_DELAY_MINUTES_AFTER)
+      : ((cfg as { fundingArb?: { exitDelayMinutesAfter?: number } }).fundingArb?.exitDelayMinutesAfter ?? 2),
+    fundingArbMaxLeverage: env.FUNDING_ARB_MAX_LEVERAGE
+      ? Number(env.FUNDING_ARB_MAX_LEVERAGE)
+      : ((cfg as { fundingArb?: { maxLeverage?: number } }).fundingArb?.maxLeverage ?? 5),
+    fundingArbMaxNotionalUsd: env.FUNDING_ARB_MAX_NOTIONAL_USD
+      ? Number(env.FUNDING_ARB_MAX_NOTIONAL_USD)
+      : ((cfg as { fundingArb?: { maxNotionalUsd?: number } }).fundingArb?.maxNotionalUsd ?? 100),
+    longerTfKlineInterval: env.LONGER_TF_KLINE_INTERVAL
+      ?? ((cfg as { longerTf?: { klineInterval?: string } }).longerTf?.klineInterval ?? "15"),
+    longerTfKlineRefreshSec: env.LONGER_TF_KLINE_REFRESH_SEC
+      ? Number(env.LONGER_TF_KLINE_REFRESH_SEC)
+      : ((cfg as { longerTf?: { klineRefreshSec?: number } }).longerTf?.klineRefreshSec ?? 60),
+    longerTfFastWindow: env.LONGER_TF_FAST_WINDOW
+      ? Number(env.LONGER_TF_FAST_WINDOW)
+      : ((cfg as { longerTf?: { fastWindow?: number } }).longerTf?.fastWindow ?? 6),
+    longerTfSlowWindow: env.LONGER_TF_SLOW_WINDOW
+      ? Number(env.LONGER_TF_SLOW_WINDOW)
+      : ((cfg as { longerTf?: { slowWindow?: number } }).longerTf?.slowWindow ?? 20),
+    longerTfThresholdBps: env.LONGER_TF_THRESHOLD_BPS
+      ? Number(env.LONGER_TF_THRESHOLD_BPS)
+      : ((cfg as { longerTf?: { thresholdBps?: number } }).longerTf?.thresholdBps ?? 20),
+    longerTfStopLossBps: env.LONGER_TF_STOP_LOSS_BPS
+      ? Number(env.LONGER_TF_STOP_LOSS_BPS)
+      : ((cfg as { longerTf?: { stopLossBps?: number } }).longerTf?.stopLossBps ?? 50),
+    longerTfTakeProfitBps: env.LONGER_TF_TAKE_PROFIT_BPS
+      ? Number(env.LONGER_TF_TAKE_PROFIT_BPS)
+      : ((cfg as { longerTf?: { takeProfitBps?: number } }).longerTf?.takeProfitBps ?? 150),
   };
 }

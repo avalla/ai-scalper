@@ -32,6 +32,7 @@ export type MarketTicker = {
   volume24h: string;
   openInterestValue: string;
   fundingRate: string;
+  nextFundingTime: string;
   bid1Price: string;
   ask1Price: string;
   bid1Size: string;
