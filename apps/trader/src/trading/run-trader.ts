@@ -80,6 +80,102 @@ import {
   type BollingerAdxKlineCache,
   type BollingerAdxPosition,
 } from "../strategies/bollinger-adx";
+import {
+  getOrderApproval,
+  type OrderSupervisorContext,
+  type SupervisedStrategy,
+} from "../meta/order-supervisor";
+
+const SUPERVISED_STRATEGY_TYPES: ReadonlyArray<SupervisedStrategy> = [
+  "funding-arb",
+  "basis-arb",
+  "pairs-trading",
+  "calendar-spread",
+];
+
+function isSupervisedStrategy(s: string): s is SupervisedStrategy {
+  return (SUPERVISED_STRATEGY_TYPES as ReadonlyArray<string>).includes(s);
+}
+
+/**
+ * Pre-entry LLM order supervisor gate. Returns true to PROCEED with the
+ * entry, false to SKIP it. Hard-coded fail-safe: any unexpected throw is
+ * caught and treated per `orderSupervisorOnErrorBehavior` (default reject).
+ *
+ * NOTE: this is a synchronous blocking call (typically 2–5s, bounded by
+ * `orderSupervisorTimeoutMs`). It is intentionally NOT applied to fast
+ * strategies (ma-crossover, longer-tf, bollinger-adx) where the latency
+ * would kill the setup. It is also NOT applied to exits — exits must be
+ * deterministic so a failed LLM call cannot leave a dangling position.
+ */
+async function maybeSupervisedApprove(args: {
+  alerter: WebhookAlerter;
+  config: TraderConfig;
+  context: OrderSupervisorContext;
+  observedAt: string;
+}): Promise<boolean> {
+  const { alerter, config, context, observedAt } = args;
+  if (!config.orderSupervisorEnabled) return true;
+  if (!isSupervisedStrategy(context.strategyType)) return true;
+  if (!config.orderSupervisorStrategies.includes(context.strategyType)) return true;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey.trim() === "") {
+    // Not configured — treat per onErrorBehavior (default reject).
+    const approve = config.orderSupervisorOnErrorBehavior === "approve";
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "order-supervisor-skipped",
+      reason: "no-api-key",
+      strategyType: context.strategyType,
+      symbol: context.symbol,
+      effectiveApprove: approve,
+    }));
+    return approve;
+  }
+  let verdict;
+  try {
+    verdict = await getOrderApproval({
+      context,
+      apiKey,
+      model: config.orderSupervisorModel,
+      timeoutMs: config.orderSupervisorTimeoutMs,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const approve = config.orderSupervisorOnErrorBehavior === "approve";
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "order-supervisor-unexpected-error",
+      strategyType: context.strategyType,
+      symbol: context.symbol,
+      error: msg,
+      effectiveApprove: approve,
+    }));
+    return approve;
+  }
+  const effectiveApprove =
+    verdict.approved && verdict.confidence >= config.orderSupervisorMinConfidence;
+  console.log(JSON.stringify({
+    ts: observedAt,
+    event: "order-supervisor-verdict",
+    strategyType: context.strategyType,
+    symbol: context.symbol,
+    side: context.side,
+    notionalUsd: context.notionalUsd,
+    approved: verdict.approved,
+    effectiveApprove,
+    confidence: verdict.confidence,
+    reasoning: verdict.reasoning,
+    concerns: verdict.concerns,
+  }));
+  if (!effectiveApprove) {
+    await alerter.send(
+      `order rejected by supervisor: ${verdict.reasoning}`,
+      { symbol: context.symbol, side: context.side, strategyType: context.strategyType },
+    ).catch(() => {});
+  }
+  return effectiveApprove;
+}
 
 function toNumber(value: string): number {
   const parsed = Number(value);
@@ -1026,6 +1122,39 @@ async function runAlternativeStrategyTick(params: {
       return { shouldContinueLoop: true };
     }
     const qty = normalizedQty.toFixed(countDecimals(instrument.lotSizeFilter.qtyStep));
+    // Pre-entry LLM order supervisor gate (only for supervised strategies).
+    // Synchronous: blocks this tick up to `orderSupervisorTimeoutMs` (default 8s).
+    // For funding-arb that latency is acceptable since trades are ~3/day.
+    if (config.strategyType === "funding-arb") {
+      const approve = await maybeSupervisedApprove({
+        alerter: params.alerter,
+        config,
+        observedAt: params.observedAt,
+        context: {
+          strategyType: "funding-arb",
+          symbol: activeSymbol,
+          side: entryAction,
+          notionalUsd,
+          leverage: clampedLeverage,
+          signalSnapshot: {
+            fundingRateBps,
+            nextFundingTime: Number(ticker.nextFundingTime),
+            minutesToFunding: Number.isFinite(Number(ticker.nextFundingTime))
+              ? Math.max(0, (Number(ticker.nextFundingTime) - Date.now()) / 60_000)
+              : null,
+          },
+          recentTrades: 0,
+          recentWinRate: 0,
+          recentNetPnlUsd: 0,
+          walletAvailableUsd: 0,
+          openPositionsCount: state.position ? 1 : 0,
+          cumulativeDailyPnlUsd: state.realizedPnlUsd,
+        },
+      });
+      if (!approve) {
+        return { shouldContinueLoop: true };
+      }
+    }
     const exec = await executeTrade({
       action: entryAction,
       client,
@@ -1223,6 +1352,37 @@ async function runBasisArbTick(params: {
     const qtyStr = normalizedQty.toFixed(countDecimals(instrument.lotSizeFilter.qtyStep));
     const perpOrderSide: "Buy" | "Sell" = decision.perpSide === "long" ? "Buy" : "Sell";
     const spotOrderSide: "Buy" | "Sell" = decision.spotSide === "long" ? "Buy" : "Sell";
+
+    // Pre-entry LLM supervisor gate (basis-arb is ~3-10 trades/day; latency OK).
+    {
+      const approve = await maybeSupervisedApprove({
+        alerter: params.alerter,
+        config,
+        observedAt: params.observedAt,
+        context: {
+          strategyType: "basis-arb",
+          symbol,
+          side: decision.perpSide,
+          notionalUsd,
+          leverage: 1,
+          signalSnapshot: {
+            spotPrice,
+            perpPrice,
+            basisBps: decision.basisBps,
+            fundingRateBps,
+          },
+          recentTrades: 0,
+          recentWinRate: 0,
+          recentNetPnlUsd: 0,
+          walletAvailableUsd: 0,
+          openPositionsCount: basisPositionRef.get() ? 1 : 0,
+          cumulativeDailyPnlUsd: stateRef.get().realizedPnlUsd,
+        },
+      });
+      if (!approve) {
+        return { shouldContinueLoop: true };
+      }
+    }
 
     if (config.paperTrading) {
       // Paper mode: simulate both fills at current mid prices.
@@ -1652,6 +1812,40 @@ async function runCalendarSpreadTick(params: {
     const perpOrderSide: "Buy" | "Sell" = decision.perpSide === "long" ? "Buy" : "Sell";
     const datedOrderSide: "Buy" | "Sell" = decision.datedSide === "long" ? "Buy" : "Sell";
 
+    // Pre-entry LLM supervisor gate (calendar-spread is ~1 trade/quarter; latency negligible).
+    {
+      const hoursToSettlement = (datedDeliveryAt - Date.now()) / 3_600_000;
+      const approve = await maybeSupervisedApprove({
+        alerter: params.alerter,
+        config,
+        observedAt: params.observedAt,
+        context: {
+          strategyType: "calendar-spread",
+          symbol: perpSymbol,
+          side: decision.perpSide,
+          notionalUsd: notionalPerLeg,
+          leverage: 1,
+          signalSnapshot: {
+            perpSymbol,
+            datedSymbol,
+            perpPrice,
+            datedPrice,
+            spreadBps: decision.spreadBps,
+            hoursToSettlement,
+          },
+          recentTrades: 0,
+          recentWinRate: 0,
+          recentNetPnlUsd: 0,
+          walletAvailableUsd: 0,
+          openPositionsCount: calendarPositionRef.get() ? 1 : 0,
+          cumulativeDailyPnlUsd: stateRef.get().realizedPnlUsd,
+        },
+      });
+      if (!approve) {
+        return { shouldContinueLoop: true };
+      }
+    }
+
     if (config.paperTrading) {
       const now = Date.now();
       calendarPositionRef.set({
@@ -2070,6 +2264,43 @@ async function runPairsTradingTick(params: {
     const leg2QtyStr = leg2Qty.toFixed(countDecimals(leg2Instrument.lotSizeFilter.qtyStep));
     const leg1OrderSide: "Buy" | "Sell" = decision.leg1Side === "long" ? "Buy" : "Sell";
     const leg2OrderSide: "Buy" | "Sell" = decision.leg2Side === "long" ? "Buy" : "Sell";
+
+    // Pre-entry LLM supervisor gate (pairs-trading is ~1-5 trades/day; latency OK).
+    {
+      const spread = decision.hedgeRatio
+        ? Math.log(leg1Price) - decision.hedgeRatio * Math.log(leg2Price)
+        : 0;
+      const approve = await maybeSupervisedApprove({
+        alerter: params.alerter,
+        config,
+        observedAt: params.observedAt,
+        context: {
+          strategyType: "pairs-trading",
+          symbol: leg1Symbol,
+          side: decision.leg1Side,
+          notionalUsd: notionalPerLeg,
+          leverage: 1,
+          signalSnapshot: {
+            leg1Symbol,
+            leg2Symbol,
+            z: decision.z,
+            hedgeRatio: decision.hedgeRatio,
+            leg1Price,
+            leg2Price,
+            spread,
+          },
+          recentTrades: 0,
+          recentWinRate: 0,
+          recentNetPnlUsd: 0,
+          walletAvailableUsd: 0,
+          openPositionsCount: pairsPositionRef.get() ? 1 : 0,
+          cumulativeDailyPnlUsd: stateRef.get().realizedPnlUsd,
+        },
+      });
+      if (!approve) {
+        return { shouldContinueLoop: true };
+      }
+    }
 
     if (config.paperTrading) {
       const now = Date.now();

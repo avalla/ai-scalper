@@ -14,6 +14,7 @@ State of strategies in the bot. Each can be selected via `CONFIG_FILE=config.<na
 | 5 | `bollinger-adx` | `config.bollinger-adx.json` | regime-adaptive (range vs trend) | ✅ Ready for live | single-leg, 15m bars |
 | 6 | `calendar-spread` | `config.calendar-spread.json` | perp ↔ dated quarterly convergence | ✅ Ready for live, **v1** | Operator must populate `calendarSpread.datedSymbol` + `datedDeliveryAt` (Unix ms) from Bybit's listed quarterlies. Two-leg with same naked-exposure guard as basis-arb. |
 | 7 | LLM strategy advisor | any config + `ANTHROPIC_API_KEY` | meta — recommends which of the 6 strategies to run | ✅ Advisory-only **v1** | Opt-in via `ANTHROPIC_API_KEY`. Runs every `ADVISOR_INTERVAL_MINUTES` (default 30) as a separate process spawned by `start-stack`. Writes `apps/trader/data/runtime/strategy-advisor.json` + posts to `alertWebhookUrl`. Does NOT auto-switch the trader's strategy — operator decides. Prompt caching keeps cost ~$0.05-0.50/day. |
+| 8 | LLM order supervisor | low-freq strategy config + `ANTHROPIC_API_KEY` + `ORDER_SUPERVISOR_ENABLED=true` | meta — pre-entry approval for funding-arb / basis-arb / pairs-trading / calendar-spread | ✅ **v1** | Opt-in. Calls Haiku before each ENTRY in supervised strategies (max ~8s blocking). Rejects entry if LLM disapproves OR confidence < `ORDER_SUPERVISOR_MIN_CONFIDENCE` (default 0.5). Exits/holds NOT supervised — deterministic. Fast strategies (`ma-crossover`, `longer-tf`, `bollinger-adx`) NOT supervised — latency would kill the setup. Safe-reject default on any failure (no key, timeout, SDK error). Cost ~$0.005-0.05/trade with prompt caching → ~$0.02-1.00/day. |
 
 ## 🚧 Next on roadmap
 
@@ -139,6 +140,11 @@ CONFIG_FILE=config.basis-arb.json bun run all
 
 # original scalping (kept for reference — expect net negative due to fees)
 CONFIG_FILE=config.aggressive.json bun run all
+
+# any low-freq strategy + LLM pre-entry order supervisor (Haiku)
+ANTHROPIC_API_KEY=sk-ant-... \
+  ORDER_SUPERVISOR_ENABLED=true \
+  CONFIG_FILE=config.funding-arb.json bun run all
 ```
 
 For all of them, monitor with:

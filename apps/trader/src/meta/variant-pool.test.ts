@@ -134,6 +134,12 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     advisorEnabled: false,
     advisorIntervalMinutes: 30,
     advisorModel: "claude-haiku-4-5-20251001",
+    orderSupervisorEnabled: false,
+    orderSupervisorStrategies: ["funding-arb", "basis-arb", "pairs-trading", "calendar-spread"],
+    orderSupervisorMinConfidence: 0.5,
+    orderSupervisorModel: "claude-haiku-4-5-20251001",
+    orderSupervisorTimeoutMs: 8000,
+    orderSupervisorOnErrorBehavior: "reject" as const,
     ...overrides,
   };
 }

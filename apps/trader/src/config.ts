@@ -112,6 +112,13 @@ export interface TraderConfig {
   advisorEnabled: boolean;
   advisorIntervalMinutes: number;
   advisorModel: string;
+  // LLM order supervisor (opt-in pre-entry approval; supervised strategies only)
+  orderSupervisorEnabled: boolean;
+  orderSupervisorStrategies: string[];
+  orderSupervisorMinConfidence: number;
+  orderSupervisorModel: string;
+  orderSupervisorTimeoutMs: number;
+  orderSupervisorOnErrorBehavior: "reject" | "approve";
   // Pairs-trading strategy parameters (cointegration mean reversion across two symbols)
   pairsLeg1Symbol: string;
   pairsLeg2Symbol: string;
@@ -382,6 +389,26 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
       : ((cfg as { advisor?: { intervalMinutes?: number } }).advisor?.intervalMinutes ?? 30),
     advisorModel: env.ADVISOR_MODEL
       ?? ((cfg as { advisor?: { model?: string } }).advisor?.model ?? "claude-haiku-4-5-20251001"),
+    orderSupervisorEnabled: env.ORDER_SUPERVISOR_ENABLED
+      ? env.ORDER_SUPERVISOR_ENABLED === "true"
+      : ((cfg as { orderSupervisor?: { enabled?: boolean } }).orderSupervisor?.enabled ?? false),
+    orderSupervisorStrategies: env.ORDER_SUPERVISOR_STRATEGIES
+      ? env.ORDER_SUPERVISOR_STRATEGIES.split(",").map((s) => s.trim()).filter(Boolean)
+      : ((cfg as { orderSupervisor?: { strategies?: string[] } }).orderSupervisor?.strategies
+        ?? ["funding-arb", "basis-arb", "pairs-trading", "calendar-spread"]),
+    orderSupervisorMinConfidence: env.ORDER_SUPERVISOR_MIN_CONFIDENCE
+      ? Number(env.ORDER_SUPERVISOR_MIN_CONFIDENCE)
+      : ((cfg as { orderSupervisor?: { minConfidence?: number } }).orderSupervisor?.minConfidence ?? 0.5),
+    orderSupervisorModel: env.ORDER_SUPERVISOR_MODEL
+      ?? ((cfg as { orderSupervisor?: { model?: string } }).orderSupervisor?.model ?? "claude-haiku-4-5-20251001"),
+    orderSupervisorTimeoutMs: env.ORDER_SUPERVISOR_TIMEOUT_MS
+      ? Number(env.ORDER_SUPERVISOR_TIMEOUT_MS)
+      : ((cfg as { orderSupervisor?: { timeoutMs?: number } }).orderSupervisor?.timeoutMs ?? 8000),
+    orderSupervisorOnErrorBehavior: ((): "reject" | "approve" => {
+      const raw = env.ORDER_SUPERVISOR_ON_ERROR_BEHAVIOR
+        ?? ((cfg as { orderSupervisor?: { onErrorBehavior?: string } }).orderSupervisor?.onErrorBehavior ?? "reject");
+      return raw === "approve" ? "approve" : "reject";
+    })(),
     basisArbEntryThresholdBps: env.BASIS_ARB_ENTRY_THRESHOLD_BPS
       ? Number(env.BASIS_ARB_ENTRY_THRESHOLD_BPS)
       : ((cfg as { basisArb?: { entryThresholdBps?: number } }).basisArb?.entryThresholdBps ?? 8),
