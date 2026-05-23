@@ -1,9 +1,11 @@
 import { createBybitClient } from "@ai-scalper/bybit-client";
+import type { MarketKline } from "@ai-scalper/bybit-client";
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
   scoreScalpCandidate,
   type ScalpCandidate,
+  type StrategySignal,
 } from "@ai-scalper/trading-core";
 
 export interface ScanConfig {
@@ -12,27 +14,31 @@ export interface ScanConfig {
   scanPrefilterLimit: number;
   scanKlineInterval: string;
   scanKlineLimit: number;
+  scanSignalThresholdBps: number;
   scanOutputDir: string;
   scanBaseUrl: string;
   scanTakerFeeBps: number;
   scanEstimatedSlippageBps: number;
   scanMinNetEdgeBps: number;
   scanMaxFundingBps: number;
-  backtestCandidateLimit: number;
 }
 
 export interface ScanArtifacts {
   generatedAt: string;
   latestPath: string;
   snapshotPath: string;
-  backtestCandidatesPath: string;
+}
+
+export interface RankedTradeSetup extends ScalpCandidate {
+  action: StrategySignal;
+  trendBps: number;
 }
 
 export interface MarketScanResult {
   ts: string;
   mode: "scan";
   category: string;
-  candidates: ScalpCandidate[];
+  candidates: RankedTradeSetup[];
   artifacts: ScanArtifacts;
 }
 
@@ -43,13 +49,13 @@ export function readScanConfig(env: NodeJS.ProcessEnv = process.env): ScanConfig
     scanPrefilterLimit: Number(env.SCAN_PREFILTER_LIMIT || "25"),
     scanKlineInterval: env.SCAN_KLINE_INTERVAL || "1",
     scanKlineLimit: Number(env.SCAN_KLINE_LIMIT || "15"),
+    scanSignalThresholdBps: Number(env.SCAN_SIGNAL_THRESHOLD_BPS || "3"),
     scanOutputDir: env.SCAN_OUTPUT_DIR || "apps/trader/data",
     scanBaseUrl: env.BYBIT_SCAN_BASE_URL || "https://api.bybit.com",
     scanTakerFeeBps: Number(env.SCAN_TAKER_FEE_BPS || "5.5"),
     scanEstimatedSlippageBps: Number(env.SCAN_ESTIMATED_SLIPPAGE_BPS || "4"),
     scanMinNetEdgeBps: Number(env.SCAN_MIN_NET_EDGE_BPS || "4"),
     scanMaxFundingBps: Number(env.SCAN_MAX_FUNDING_BPS || "10"),
-    backtestCandidateLimit: Number(env.BACKTEST_CANDIDATE_LIMIT || "5"),
   };
 }
 
@@ -80,8 +86,40 @@ function averageMinuteRangeBps(
   return total / klines.length;
 }
 
+function sortKlinesAscending(klines: MarketKline[]): MarketKline[] {
+  return [...klines].sort((left, right) => Number(left.startTime) - Number(right.startTime));
+}
+
+export function deriveTrendBpsFromKlines(klines: MarketKline[]): number {
+  if (klines.length === 0) {
+    return 0;
+  }
+
+  const ordered = sortKlinesAscending(klines);
+  const firstOpen = Number(ordered[0]?.openPrice);
+  const lastClose = Number(ordered.at(-1)?.closePrice);
+
+  if (!Number.isFinite(firstOpen) || !Number.isFinite(lastClose) || firstOpen <= 0) {
+    return 0;
+  }
+
+  return ((lastClose - firstOpen) / firstOpen) * 10_000;
+}
+
+export function deriveTradeActionFromTrend(trendBps: number, thresholdBps: number): StrategySignal {
+  if (trendBps >= thresholdBps) {
+    return "long";
+  }
+
+  if (trendBps <= -thresholdBps) {
+    return "short";
+  }
+
+  return "flat";
+}
+
 async function persistScanArtifacts(params: {
-  candidates: ScalpCandidate[];
+  candidates: RankedTradeSetup[];
   config: ScanConfig;
 }): Promise<ScanArtifacts> {
   const outputDir = resolveOutputDir(params.config.scanOutputDir);
@@ -105,39 +143,17 @@ async function persistScanArtifacts(params: {
     },
     candidates: params.candidates,
   };
-  const backtestCandidates = {
-    generatedAt,
-    status: "pending",
-    candidates: params.candidates.slice(0, params.config.backtestCandidateLimit).map((candidate) => ({
-      symbol: candidate.symbol,
-      score: candidate.score,
-      netEdgeBps: candidate.netEdgeBps,
-      turnover24h: candidate.turnover24h,
-      minuteRangeBps: candidate.minuteRangeBps,
-      spreadBps: candidate.spreadBps,
-      estimatedRoundTripCostBps: candidate.estimatedRoundTripCostBps,
-      priorityBucket: candidate.turnover24h >= 100_000_000
-        ? "high-liquidity"
-        : candidate.minuteRangeBps >= 40
-          ? "high-volatility"
-          : "standard",
-      nextStep: "run fee-aware backtest",
-    })),
-  };
 
   const latestPath = join(outputDir, "scan-latest.json");
   const snapshotPath = join(scansDir, `scan-${timestamp}.json`);
-  const backtestCandidatesPath = join(outputDir, "backtest-candidates.json");
 
   await Bun.write(latestPath, `${JSON.stringify(latestPayload, null, 2)}\n`);
   await Bun.write(snapshotPath, `${JSON.stringify(latestPayload, null, 2)}\n`);
-  await Bun.write(backtestCandidatesPath, `${JSON.stringify(backtestCandidates, null, 2)}\n`);
 
   return {
     generatedAt,
     latestPath,
     snapshotPath,
-    backtestCandidatesPath,
   };
 }
 
@@ -154,7 +170,7 @@ function resolveOutputDir(scanOutputDir: string): string {
   return join(cwd, scanOutputDir);
 }
 
-export async function scanMarket(config: ScanConfig): Promise<MarketScanResult> {
+export async function rankTradeSetups(config: ScanConfig): Promise<RankedTradeSetup[]> {
   const client = createBybitClient({
     baseUrl: config.scanBaseUrl,
   });
@@ -164,7 +180,7 @@ export async function scanMarket(config: ScanConfig): Promise<MarketScanResult> 
     .sort((left, right) => parseTickerNumber(right.turnover24h) - parseTickerNumber(left.turnover24h))
     .slice(0, config.scanPrefilterLimit);
 
-  const candidates = await Promise.all(shortlist.map(async (ticker): Promise<ScalpCandidate | null> => {
+  const candidates = await Promise.all(shortlist.map(async (ticker): Promise<RankedTradeSetup | null> => {
     try {
       const [instrument, klines] = await Promise.all([
         client.getInstrumentInfo({
@@ -179,7 +195,7 @@ export async function scanMarket(config: ScanConfig): Promise<MarketScanResult> 
         }),
       ]);
 
-      return scoreScalpCandidate({
+      const candidate = scoreScalpCandidate({
         symbol: ticker.symbol,
         lastPrice: parseTickerNumber(ticker.lastPrice),
         bidPrice: parseTickerNumber(ticker.bid1Price),
@@ -194,16 +210,32 @@ export async function scanMarket(config: ScanConfig): Promise<MarketScanResult> 
         estimatedRoundTripCostBps: (config.scanTakerFeeBps * 2) + config.scanEstimatedSlippageBps,
         minNetEdgeBps: config.scanMinNetEdgeBps,
       });
+
+      if (!candidate) {
+        return null;
+      }
+
+      const trendBps = deriveTrendBpsFromKlines(klines);
+
+      return {
+        ...candidate,
+        action: deriveTradeActionFromTrend(trendBps, config.scanSignalThresholdBps),
+        trendBps: Number(trendBps.toFixed(2)),
+      };
     } catch {
       return null;
     }
   }));
 
-  const ranked = candidates
-    .filter((candidate): candidate is ScalpCandidate => candidate !== null)
+  return candidates
+    .filter((candidate): candidate is RankedTradeSetup => candidate !== null)
     .filter((candidate) => Math.abs(candidate.fundingRateBps) <= config.scanMaxFundingBps)
     .sort((left, right) => right.score - left.score)
     .slice(0, config.scanLimit);
+}
+
+export async function scanMarket(config: ScanConfig): Promise<MarketScanResult> {
+  const ranked = await rankTradeSetups(config);
 
   const artifacts = await persistScanArtifacts({
     candidates: ranked,

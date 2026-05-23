@@ -3,13 +3,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "worker": "bun src/index.ts",
-    "enqueue:scan": "bun src/enqueue-market-scan.ts"
+    "worker": "bun --env-file ../../.env src/index.ts",
+    "enqueue:scan": "bun --env-file ../../.env src/enqueue-market-scan.ts",
+    "enqueue:session": "bun --env-file ../../.env src/enqueue-trader-session.ts",
+    "up": "bun --env-file ../../.env src/start-stack.ts",
+    "board": "bun --env-file ../../.env src/board.ts"
   },
   "dependencies": {
+    "@bull-board/api": "^6.14.0",
+    "@bull-board/express": "^6.14.0",
     "@ai-scalper/market-scanner": "workspace:*",
     "@ai-scalper/queueing": "workspace:*",
     "bullmq": "^5.58.0",
+    "express": "^5.1.0",
     "ioredis": "^5.6.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3"
   }
 }

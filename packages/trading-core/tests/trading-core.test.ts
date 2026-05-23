@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildPositionTargets,
   evaluateAggressivePerpsRisk,
   buildSignal,
   evaluateRisk,
@@ -106,6 +107,7 @@ describe("paper trading state", () => {
       quantity: 1,
       notionalUsd: 100,
       entryPrice: 100,
+      openedAt: 1,
     });
     expect(opened.position?.stopLossPrice).toBeCloseTo(99.8);
     expect(opened.position?.takeProfitPrice).toBeCloseTo(100.3);
@@ -124,6 +126,28 @@ describe("paper trading state", () => {
 
     expect(closed.position).toBeNull();
     expect(closed.realizedPnlUsd).toBe(1);
+  });
+
+  test("builds symmetric targets for long and short positions", () => {
+    expect(buildPositionTargets({
+      action: "long",
+      price: 100,
+      stopLossBps: 20,
+      takeProfitBps: 30,
+    })).toEqual({
+      stopLossPrice: 99.8,
+      takeProfitPrice: 100.29999999999998,
+    });
+
+    expect(buildPositionTargets({
+      action: "short",
+      price: 100,
+      stopLossBps: 20,
+      takeProfitBps: 30,
+    })).toEqual({
+      stopLossPrice: 100.2,
+      takeProfitPrice: 99.7,
+    });
   });
 
   test("returns a stop loss exit for a short position when price rises", () => {
@@ -210,6 +234,25 @@ describe("market scanner scoring", () => {
 });
 
 describe("aggressive perps risk", () => {
+  test("treats an empty aggressive whitelist as market-wide", () => {
+    expect(evaluateAggressivePerpsRisk({
+      symbol: "PEPEUSDT",
+      leverage: 10,
+      fundingRateBps: 1,
+      notionalUsd: 100,
+      stopLossBps: 20,
+      limits: {
+        maxLeverage: 50,
+        maxFundingRateBps: 8,
+        maxLossPerTradeUsd: 8,
+        minEstimatedLiqBufferBps: 80,
+        allowedSymbols: [],
+      },
+    })).toEqual({
+      allowed: true,
+    });
+  });
+
   test("blocks symbols outside the aggressive whitelist", () => {
     expect(evaluateAggressivePerpsRisk({
       symbol: "PEPEUSDT",
@@ -319,5 +362,303 @@ describe("exceptional leverage policy", () => {
       exceptional: false,
       reason: "spread-too-wide",
     });
+  });
+});
+
+describe("buildSignal - additional cases", () => {
+  test("returns short when fast average is below slow average by threshold", () => {
+    expect(buildSignal({
+      prices: [101, 100.8, 100.6, 100.4, 100, 99.6],
+      fastWindow: 3,
+      slowWindow: 6,
+      thresholdBps: 10,
+    })).toBe("short");
+  });
+
+  test("returns flat when divergence does not reach threshold", () => {
+    expect(buildSignal({
+      prices: [100, 100, 100, 100, 100, 100.001],
+      fastWindow: 3,
+      slowWindow: 6,
+      thresholdBps: 10,
+    })).toBe("flat");
+  });
+});
+
+describe("evaluateRisk - additional cases", () => {
+  const baseLimits = {
+    maxPositionUsd: 100,
+    maxDailyLossUsd: 50,
+    minTradeIntervalMs: 15_000,
+    maxSpreadBps: 20,
+  };
+  const baseMarket = { lastPrice: 100, markPrice: 100 };
+  const cleanState = { lastTradeAt: null, realizedPnlUsd: 0, position: null };
+
+  test("allows a valid trade", () => {
+    expect(evaluateRisk({
+      action: "long",
+      limits: baseLimits,
+      market: baseMarket,
+      now: 100_000,
+      orderUsd: 50,
+      state: cleanState,
+    })).toEqual({ allowed: true });
+  });
+
+  test("blocks when action is flat", () => {
+    expect(evaluateRisk({
+      action: "flat",
+      limits: baseLimits,
+      market: baseMarket,
+      now: 100_000,
+      orderUsd: 50,
+      state: cleanState,
+    })).toEqual({ allowed: false, reason: "signal-flat" });
+  });
+
+  test("blocks when cooldown is active", () => {
+    const now = 100_000;
+    expect(evaluateRisk({
+      action: "long",
+      limits: baseLimits,
+      market: baseMarket,
+      now,
+      orderUsd: 50,
+      state: { ...cleanState, lastTradeAt: now - 5_000 },
+    })).toEqual({ allowed: false, reason: "cooldown-active" });
+  });
+
+  test("blocks when daily loss limit is reached", () => {
+    expect(evaluateRisk({
+      action: "long",
+      limits: baseLimits,
+      market: baseMarket,
+      now: 100_000,
+      orderUsd: 50,
+      state: { ...cleanState, realizedPnlUsd: -50 },
+    })).toEqual({ allowed: false, reason: "daily-loss-limit" });
+  });
+});
+
+describe("getExitReason", () => {
+  const longState = updatePaperState({
+    action: "long",
+    leverage: 5,
+    notionalUsd: 100,
+    price: 100,
+    previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null },
+    now: 1,
+    stopLossBps: 20,
+    takeProfitBps: 30,
+  });
+
+  const shortState = updatePaperState({
+    action: "short",
+    leverage: 3,
+    notionalUsd: 90,
+    price: 100,
+    previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null },
+    now: 1,
+    stopLossBps: 20,
+    takeProfitBps: 30,
+  });
+
+  test("returns null when there is no open position", () => {
+    expect(getExitReason({
+      marketPrice: 100,
+      signal: "flat",
+      state: { lastTradeAt: null, realizedPnlUsd: 0, position: null },
+    })).toBeNull();
+  });
+
+  test("returns take-profit for a long when price reaches TP", () => {
+    expect(getExitReason({ marketPrice: 100.3, signal: "flat", state: longState })).toBe("take-profit");
+  });
+
+  test("returns stop-loss for a long when price reaches SL", () => {
+    expect(getExitReason({ marketPrice: 99.8, signal: "flat", state: longState })).toBe("stop-loss");
+  });
+
+  test("returns signal-reversal for a long when a short signal fires", () => {
+    expect(getExitReason({ marketPrice: 100.1, signal: "short", state: longState })).toBe("signal-reversal");
+  });
+
+  test("returns null for a long when no exit condition is met", () => {
+    expect(getExitReason({ marketPrice: 100.1, signal: "flat", state: longState })).toBeNull();
+  });
+
+  test("returns take-profit for a short when price falls to TP", () => {
+    expect(getExitReason({ marketPrice: 99.7, signal: "flat", state: shortState })).toBe("take-profit");
+  });
+
+  test("returns signal-reversal for a short when a long signal fires", () => {
+    expect(getExitReason({ marketPrice: 99.9, signal: "long", state: shortState })).toBe("signal-reversal");
+  });
+});
+
+describe("updatePaperState - additional cases", () => {
+  test("opens a short position with correct stop-loss and take-profit prices", () => {
+    const state = updatePaperState({
+      action: "short",
+      leverage: 3,
+      notionalUsd: 90,
+      price: 100,
+      previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null },
+      now: 1,
+      stopLossBps: 20,
+      takeProfitBps: 30,
+    });
+    expect(state.position?.side).toBe("short");
+    expect(state.position?.stopLossPrice).toBeCloseTo(100.2);
+    expect(state.position?.takeProfitPrice).toBeCloseTo(99.7);
+  });
+
+  test("reduceOnly with no open position is a no-op", () => {
+    const prev = { lastTradeAt: null as number | null, realizedPnlUsd: 5, position: null };
+    expect(updatePaperState({
+      action: "long",
+      leverage: 1,
+      notionalUsd: 100,
+      price: 100,
+      previous: prev,
+      now: 1,
+      stopLossBps: 20,
+      takeProfitBps: 30,
+      reduceOnly: true,
+    })).toBe(prev);
+  });
+});
+
+describe("scoreScalpCandidate - additional cases", () => {
+  test("returns null when any price input is zero or negative", () => {
+    const base = {
+      symbol: "XUSDT",
+      lastPrice: 100,
+      bidPrice: 0,
+      askPrice: 100.01,
+      turnover24h: 5_000_000,
+      openInterestValue: 3_000_000,
+      price24hPcnt: 0.01,
+      prevPrice1h: 99.8,
+      fundingRate: 0.00005,
+      maxLeverage: 25,
+      minuteRangeBps: 25,
+    };
+    expect(scoreScalpCandidate({ ...base, bidPrice: 0 })).toBeNull();
+    expect(scoreScalpCandidate({ ...base, askPrice: 0 })).toBeNull();
+    expect(scoreScalpCandidate({ ...base, lastPrice: 0 })).toBeNull();
+  });
+});
+
+describe("evaluateAggressivePerpsRisk - additional cases", () => {
+  const baseLimits = {
+    maxLeverage: 50,
+    maxFundingRateBps: 8,
+    maxLossPerTradeUsd: 8,
+    minEstimatedLiqBufferBps: 80,
+    allowedSymbols: [] as string[],
+  };
+
+  test("blocks when funding rate is too high", () => {
+    expect(evaluateAggressivePerpsRisk({
+      symbol: "BTCUSDT",
+      leverage: 10,
+      fundingRateBps: 12,
+      notionalUsd: 100,
+      stopLossBps: 20,
+      limits: baseLimits,
+    })).toEqual({ allowed: false, reason: "funding-too-high" });
+  });
+
+  test("blocks when leverage exceeds the limit", () => {
+    expect(evaluateAggressivePerpsRisk({
+      symbol: "BTCUSDT",
+      leverage: 75,
+      fundingRateBps: 1,
+      notionalUsd: 100,
+      stopLossBps: 20,
+      limits: baseLimits,
+    })).toEqual({ allowed: false, reason: "leverage-too-high" });
+  });
+
+  test("blocks when estimated loss at stop exceeds per-trade limit", () => {
+    expect(evaluateAggressivePerpsRisk({
+      symbol: "BTCUSDT",
+      leverage: 10,
+      fundingRateBps: 1,
+      notionalUsd: 1_000,
+      stopLossBps: 100,
+      limits: baseLimits,
+    })).toEqual({ allowed: false, reason: "loss-per-trade-limit" });
+  });
+});
+
+describe("selectLeverageForOpportunity - additional gates", () => {
+  const basePolicy = {
+    allowedSymbols: ["BTCUSDT", "ETHUSDT"],
+    exceptionalLeverage: 100,
+    maxSpreadBps: 0.5,
+    maxFundingRateBps: 2,
+    minHourlyMoveBps: 100,
+    minMinuteRangeBps: 20,
+    minNetEdgeBps: 10,
+  };
+  const baseParams = {
+    symbol: "BTCUSDT",
+    configuredLeverage: 25,
+    fundingRateBps: 1,
+    spreadBps: 0.3,
+    hourlyMoveBps: 120,
+    minuteRangeBps: 28,
+    netEdgeBps: 14,
+  };
+
+  test("allows any symbol when allowedSymbols is empty", () => {
+    expect(selectLeverageForOpportunity({
+      ...baseParams,
+      symbol: "SOLUSDT",
+      policy: { ...basePolicy, allowedSymbols: [] },
+    })).toMatchObject({ leverage: 100, exceptional: true, reason: "exceptional-conditions-met" });
+  });
+
+  test("keeps base leverage when symbol is not whitelisted", () => {
+    expect(selectLeverageForOpportunity({
+      ...baseParams,
+      symbol: "SOLUSDT",
+      policy: basePolicy,
+    })).toMatchObject({ leverage: 25, exceptional: false, reason: "symbol-not-whitelisted" });
+  });
+
+  test("keeps base leverage when funding rate is too high", () => {
+    expect(selectLeverageForOpportunity({
+      ...baseParams,
+      fundingRateBps: 5,
+      policy: basePolicy,
+    })).toMatchObject({ leverage: 25, exceptional: false, reason: "funding-too-high" });
+  });
+
+  test("keeps base leverage when hourly move is too small", () => {
+    expect(selectLeverageForOpportunity({
+      ...baseParams,
+      hourlyMoveBps: 50,
+      policy: basePolicy,
+    })).toMatchObject({ leverage: 25, exceptional: false, reason: "hourly-move-too-small" });
+  });
+
+  test("keeps base leverage when minute range is too small", () => {
+    expect(selectLeverageForOpportunity({
+      ...baseParams,
+      minuteRangeBps: 10,
+      policy: basePolicy,
+    })).toMatchObject({ leverage: 25, exceptional: false, reason: "minute-range-too-small" });
+  });
+
+  test("keeps base leverage when net edge is too small", () => {
+    expect(selectLeverageForOpportunity({
+      ...baseParams,
+      netEdgeBps: 5,
+      policy: basePolicy,
+    })).toMatchObject({ leverage: 25, exceptional: false, reason: "net-edge-too-small" });
   });
 });

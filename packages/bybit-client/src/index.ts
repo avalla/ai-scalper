@@ -87,6 +87,8 @@ export type CreateOrderRequest = {
   slippageTolerance?: string;
   timeInForce?: TimeInForce;
   orderLinkId?: string;
+  stopLoss?: string;
+  takeProfit?: string;
 };
 
 export interface CancelOrderRequest {
@@ -119,6 +121,21 @@ export interface RealtimeOrder {
   cumExecQty: string;
   avgPrice: string;
 }
+
+export interface PositionInfoRequest {
+  category: string;
+  symbol: string;
+}
+
+export interface PositionInfo {
+  symbol: string;
+  side: string;
+  size: string;
+  avgPrice: string;
+  stopLoss: string;
+  takeProfit: string;
+}
+
 
 export interface SetLeverageRequest {
   category: string;
@@ -349,6 +366,27 @@ export function createBybitClient(options: BybitClientOptions = {}) {
       });
     },
 
+    async setTradingStop(request: SetTradingStopRequest): Promise<void> {
+      const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
+      const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
+
+      await signedRequest<unknown>({
+        apiKey,
+        apiSecret,
+        baseUrl,
+        recvWindow,
+        method: "POST",
+        path: "/v5/position/trading-stop",
+        body: {
+          category: request.category,
+          symbol: request.symbol,
+          stopLoss: request.stopLoss ?? "",
+          takeProfit: request.takeProfit ?? "",
+          positionIdx: String(request.positionIdx ?? 0),
+        },
+      });
+    },
+
     async createOrder(request: CreateOrderRequest): Promise<CreateOrderResponse> {
       const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
       const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
@@ -374,6 +412,8 @@ export function createBybitClient(options: BybitClientOptions = {}) {
           slippageTolerance: request.slippageTolerance ?? "",
           timeInForce: request.timeInForce ?? "",
           orderLinkId: request.orderLinkId ?? "",
+          stopLoss: request.stopLoss ?? "",
+          takeProfit: request.takeProfit ?? "",
         },
       });
 
@@ -436,5 +476,37 @@ export function createBybitClient(options: BybitClientOptions = {}) {
 
       return data.result?.list?.[0] ?? null;
     },
+
+    async getPosition(request: PositionInfoRequest): Promise<PositionInfo | null> {
+      const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
+      const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
+
+      const data = await signedRequest<BybitListResponse<PositionInfo>>({
+        apiKey,
+        apiSecret,
+        baseUrl,
+        recvWindow,
+        method: "GET",
+        path: "/v5/position/list",
+        query: {
+          category: request.category,
+          symbol: request.symbol,
+        },
+      });
+
+      if (data.retCode !== 0) {
+        throw new Error(`Bybit position request failed: ${data.retMsg}`);
+      }
+
+      return data.result?.list?.find((position) => Number(position.size || "0") > 0) ?? null;
+    },
   };
+}
+
+export interface SetTradingStopRequest {
+  category: string;
+  symbol: string;
+  stopLoss?: string;
+  takeProfit?: string;
+  positionIdx?: 0 | 1 | 2;
 }

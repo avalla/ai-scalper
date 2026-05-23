@@ -6,26 +6,43 @@ import {
   DEFAULT_JOB_POLICY,
   JOB_NAMES,
   QUEUE_NAMES,
-  type CandidateBacktestJobData,
   type MarketScanJobData,
+  type TraderSessionJobData,
 } from "@ai-scalper/queueing";
 import { createRedisConnection } from "./redis";
+import { summarizeTraderStdout } from "./trader-log-summary";
 
 const scanJobTimeoutMs = Number(process.env.SCAN_JOB_TIMEOUT_MS || "30000");
-const candidateBacktestJobTimeoutMs = Number(process.env.CANDIDATE_BACKTEST_JOB_TIMEOUT_MS || "15000");
-const candidateBacktestHighLiquidityPriority = Number(process.env.CANDIDATE_BACKTEST_HIGH_LIQUIDITY_PRIORITY || "1");
-const candidateBacktestHighVolatilityPriority = Number(process.env.CANDIDATE_BACKTEST_HIGH_VOLATILITY_PRIORITY || "2");
-const candidateBacktestStandardPriority = Number(process.env.CANDIDATE_BACKTEST_STANDARD_PRIORITY || "3");
-const candidateBacktestDedupeWindowMinutes = Number(process.env.CANDIDATE_BACKTEST_DEDUPE_WINDOW_MINUTES || "30");
+const scanScheduleEnabled = process.env.SCAN_SCHEDULE_ENABLED !== "false";
+const scanScheduleMinutes = Number(process.env.SCAN_SCHEDULE_MINUTES || "5");
+const scanScheduleRunOnStart = process.env.SCAN_SCHEDULE_RUN_ON_START !== "false";
 const connection = createRedisConnection();
 const queue = new Queue<MarketScanJobData>(QUEUE_NAMES.marketScan, {
   connection,
   defaultJobOptions: DEFAULT_JOB_POLICY,
 });
-const candidateBacktestQueue = new Queue<CandidateBacktestJobData>(QUEUE_NAMES.candidateBacktest, {
+const paperSessionQueue = new Queue<TraderSessionJobData>(QUEUE_NAMES.paperSession, {
   connection,
   defaultJobOptions: DEFAULT_JOB_POLICY,
 });
+const liveSessionQueue = new Queue<TraderSessionJobData>(QUEUE_NAMES.liveSession, {
+  connection,
+  defaultJobOptions: DEFAULT_JOB_POLICY,
+});
+
+const BOARD_PORT = Number(process.env.BULL_BOARD_PORT || "3010");
+const BOARD_BASE_PATH = process.env.BULL_BOARD_BASE_PATH || "/admin/queues";
+const tradingMode = (process.env.BYBIT_PAPER_TRADING || "true") === "true" ? "paper" : "live";
+const network = (process.env.BYBIT_BASE_URL || "").includes("testnet") ? "testnet" : "mainnet";
+
+console.log(JSON.stringify({
+  app: "ai-scalper-worker",
+  bullBoard: `http://localhost:${BOARD_PORT}${BOARD_BASE_PATH}`,
+  tradingMode,
+  network,
+  scanScheduler: scanScheduleEnabled ? `every ${scanScheduleMinutes}m` : "disabled",
+  redis: (process.env.REDIS_URL || "redis://127.0.0.1:6379").replace(/:.+@/, ":***@"),
+}, null, 2));
 
 async function runWithTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timeoutId: Timer | null = null;
@@ -45,6 +62,53 @@ async function runWithTimeout<T>(task: Promise<T>, timeoutMs: number, label: str
   }
 }
 
+async function logJob(job: { log: (row: string) => Promise<number> }, message: string): Promise<void> {
+  await job.log(`${new Date().toISOString()} ${message}`);
+}
+
+async function collectStream(params: {
+  onLine?: (line: string) => Promise<void>;
+  stream: ReadableStream<Uint8Array> | null;
+}): Promise<string> {
+  if (!params.stream) {
+    return "";
+  }
+
+  const reader = params.stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let collected = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    const chunk = decoder.decode(value, { stream: true });
+    collected += chunk;
+    buffer += chunk;
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const normalizedLine = line.trim();
+      if (!normalizedLine || !params.onLine) {
+        continue;
+      }
+
+      await params.onLine(normalizedLine);
+    }
+  }
+
+  const tail = buffer.trim();
+  if (tail && params.onLine) {
+    await params.onLine(tail);
+  }
+
+  return collected;
+}
+
 function resolveScanOutputDir(scanOutputDir: string): string {
   if (isAbsolute(scanOutputDir)) {
     return scanOutputDir;
@@ -58,93 +122,83 @@ function resolveScanOutputDir(scanOutputDir: string): string {
   return join(cwd, scanOutputDir);
 }
 
-function priorityForCandidate(candidate: {
-  priorityBucket: CandidateBacktestJobData["priorityBucket"];
-}): number {
-  if (candidate.priorityBucket === "high-liquidity") {
-    return candidateBacktestHighLiquidityPriority;
-  }
-  if (candidate.priorityBucket === "high-volatility") {
-    return candidateBacktestHighVolatilityPriority;
-  }
-  return candidateBacktestStandardPriority;
+
+
+function scheduledScanJobId(): string {
+  const dedupeBucket = Math.floor(Date.now() / (scanScheduleMinutes * 60_000));
+  return `${JOB_NAMES.marketScanRun}:schedule:${dedupeBucket}`;
 }
 
-function candidateBacktestJobId(symbol: string): string {
-  const dedupeBucket = Math.floor(Date.now() / (candidateBacktestDedupeWindowMinutes * 60_000));
-  return `${JOB_NAMES.candidateBacktestRun}:${symbol}:${dedupeBucket}`;
-}
-
-async function persistCandidateBacktestArtifact(payload: {
-  jobId: string | undefined;
-  result: Record<string, unknown>;
-}): Promise<{ latestPath: string; historyPath: string }> {
-  const outputDir = resolveScanOutputDir(process.env.SCAN_OUTPUT_DIR || "apps/trader/data");
-  const latestDir = join(outputDir, "backtests", "queue");
-  const historyDir = join(outputDir, "backtests", "history");
-  await mkdir(latestDir, { recursive: true });
-  await mkdir(historyDir, { recursive: true });
-
-  const generatedAt = new Date().toISOString();
-  const latestPath = join(latestDir, `${String(payload.result.symbol)}.json`);
-  const historyPath = join(
-    historyDir,
-    `${String(payload.result.symbol)}-${generatedAt.replaceAll(":", "-")}.json`,
-  );
-  const body = `${JSON.stringify({
-    generatedAt: new Date().toISOString(),
-    jobId: payload.jobId ?? null,
-    ...payload.result,
-  }, null, 2)}\n`;
-  await Bun.write(latestPath, body);
-  await Bun.write(historyPath, body);
-
-  return {
-    latestPath,
-    historyPath,
-  };
-}
-
-function buildBacktestProxyResult(job: CandidateBacktestJobData): {
-  requestedAt: string;
-  requestedByJobId: string | null;
-  symbol: string;
-  score: number;
-  netEdgeBps: number;
-  turnover24h: number;
-  minuteRangeBps: number;
-  priorityBucket: CandidateBacktestJobData["priorityBucket"];
-  status: "candidate-passed" | "candidate-rejected";
-  decision: "promote-to-real-backtest" | "hold";
-  checks: {
-    liquidity: "pass" | "fail";
-    microEdge: "pass" | "fail";
-    microVolatility: "pass" | "fail";
-  };
-} {
-  const liquidityPass = job.turnover24h >= 25_000_000;
-  const microEdgePass = job.netEdgeBps >= 8;
-  const microVolatilityPass = job.minuteRangeBps >= 18;
-  const passed = liquidityPass && microEdgePass && microVolatilityPass;
-
-  return {
-    requestedAt: job.requestedAt,
-    requestedByJobId: job.requestedByJobId,
-    symbol: job.symbol,
-    score: job.score,
-    netEdgeBps: job.netEdgeBps,
-    turnover24h: job.turnover24h,
-    minuteRangeBps: job.minuteRangeBps,
-    priorityBucket: job.priorityBucket,
-    status: passed ? "candidate-passed" : "candidate-rejected",
-    decision: passed ? "promote-to-real-backtest" : "hold",
-    checks: {
-      liquidity: liquidityPass ? "pass" : "fail",
-      microEdge: microEdgePass ? "pass" : "fail",
-      microVolatility: microVolatilityPass ? "pass" : "fail",
+async function enqueueScheduledScan(trigger: MarketScanJobData["trigger"]): Promise<void> {
+  await queue.add(
+    JOB_NAMES.marketScanRun,
+    {
+      requestedAt: new Date().toISOString(),
+      trigger,
     },
-  };
+    {
+      ...DEFAULT_JOB_POLICY,
+      jobId: scheduledScanJobId(),
+    },
+  );
 }
+
+async function runTraderSession(params: {
+  job: { log: (row: string) => Promise<number> };
+  paperTrading: boolean;
+}): Promise<void> {
+  const cwd = process.cwd();
+  const traderAppDir = cwd.endsWith("/apps/worker")
+    ? join(cwd, "..", "trader")
+    : join(cwd, "apps", "trader");
+  const subprocess = Bun.spawn({
+    cmd: ["bun", "src/index.ts"],
+    cwd: traderAppDir,
+    env: {
+      ...process.env,
+      BYBIT_PAPER_TRADING: params.paperTrading ? "true" : "false",
+      TRADER_MODE: "trade",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  await logJob(params.job, `subprocess-started pid=${subprocess.pid ?? "unknown"}`);
+
+  const stdoutPromise = collectStream({
+    stream: subprocess.stdout,
+    onLine: async (line) => {
+      await logJob(params.job, `stdout ${line}`);
+      const summary = summarizeTraderStdout(line);
+      if (summary) {
+        await logJob(params.job, `state ${summary}`);
+      }
+    },
+  });
+  const stderrPromise = collectStream({
+    stream: subprocess.stderr,
+    onLine: async (line) => {
+      await logJob(params.job, `stderr ${line}`);
+    },
+  });
+
+  const exitCode = await subprocess.exited;
+  const stdout = await stdoutPromise;
+  const stderr = await stderrPromise;
+  await logJob(params.job, `subprocess-exited code=${exitCode}`);
+  if (exitCode !== 0) {
+    const stdoutTail = stdout.trim().split("\n").slice(-20).join("\n");
+    const stderrTail = stderr.trim().split("\n").slice(-20).join("\n");
+    throw new Error(
+      [
+        `Trader session exited with code ${exitCode}`,
+        stdoutTail ? `stdout:\n${stdoutTail}` : "",
+        stderrTail ? `stderr:\n${stderrTail}` : "",
+      ].filter(Boolean).join("\n\n"),
+    );
+  }
+}
+
+
 
 const worker = new Worker<MarketScanJobData>(
   QUEUE_NAMES.marketScan,
@@ -153,37 +207,13 @@ const worker = new Worker<MarketScanJobData>(
       throw new Error(`Unsupported job name: ${job.name}`);
     }
 
+    await logJob(job, `started trigger=${job.data.trigger}`);
     const result = await runWithTimeout(
       scanMarket(readScanConfig()),
       scanJobTimeoutMs,
       JOB_NAMES.marketScanRun,
     );
-    await Promise.all(result.candidates.map((candidate) => {
-      const priorityBucket: CandidateBacktestJobData["priorityBucket"] = candidate.turnover24h >= 100_000_000
-        ? "high-liquidity"
-        : candidate.minuteRangeBps >= 40
-          ? "high-volatility"
-          : "standard";
-
-      return candidateBacktestQueue.add(
-        JOB_NAMES.candidateBacktestRun,
-        {
-          requestedAt: new Date().toISOString(),
-          requestedByJobId: job.id ?? null,
-          symbol: candidate.symbol,
-          score: candidate.score,
-          netEdgeBps: candidate.netEdgeBps,
-          turnover24h: candidate.turnover24h,
-          minuteRangeBps: candidate.minuteRangeBps,
-          priorityBucket,
-        },
-        {
-          ...DEFAULT_JOB_POLICY,
-          jobId: candidateBacktestJobId(candidate.symbol),
-          priority: priorityForCandidate({ priorityBucket }),
-        },
-      );
-    }));
+    await logJob(job, `scan-completed candidates=${result.candidates.length}`);
 
     console.log(JSON.stringify({
       worker: QUEUE_NAMES.marketScan,
@@ -201,33 +231,54 @@ const worker = new Worker<MarketScanJobData>(
   },
 );
 
-const candidateBacktestWorker = new Worker<CandidateBacktestJobData>(
-  QUEUE_NAMES.candidateBacktest,
+
+
+const paperSessionWorker = new Worker<TraderSessionJobData>(
+  QUEUE_NAMES.paperSession,
   async (job) => {
-    if (job.name !== JOB_NAMES.candidateBacktestRun) {
+    if (job.name !== JOB_NAMES.paperSessionStart) {
       throw new Error(`Unsupported job name: ${job.name}`);
     }
 
-    const result = await runWithTimeout(
-      Promise.resolve(buildBacktestProxyResult(job.data)),
-      candidateBacktestJobTimeoutMs,
-      JOB_NAMES.candidateBacktestRun,
-    );
-    const artifactPaths = await persistCandidateBacktestArtifact({
-      jobId: job.id,
-      result,
+    await logJob(job, `started mode=paper trigger=${job.data.trigger}`);
+    await runTraderSession({
+      job,
+      paperTrading: true,
     });
-
-    console.log(JSON.stringify({
-      worker: QUEUE_NAMES.candidateBacktest,
-      jobId: job.id,
-      artifactPaths,
-      result,
-    }, null, 2));
+    await logJob(job, "completed mode=paper");
 
     return {
-      ...result,
-      artifactPaths,
+      finishedAt: new Date().toISOString(),
+      mode: "paper",
+      requestedAt: job.data.requestedAt,
+      status: "completed",
+    };
+  },
+  {
+    connection,
+    concurrency: 1,
+  },
+);
+
+const liveSessionWorker = new Worker<TraderSessionJobData>(
+  QUEUE_NAMES.liveSession,
+  async (job) => {
+    if (job.name !== JOB_NAMES.liveSessionStart) {
+      throw new Error(`Unsupported job name: ${job.name}`);
+    }
+
+    await logJob(job, `started mode=live trigger=${job.data.trigger}`);
+    await runTraderSession({
+      job,
+      paperTrading: false,
+    });
+    await logJob(job, "completed mode=live");
+
+    return {
+      finishedAt: new Date().toISOString(),
+      mode: "live",
+      requestedAt: job.data.requestedAt,
+      status: "completed",
     };
   },
   {
@@ -253,18 +304,35 @@ worker.on("completed", (job) => {
   }, null, 2));
 });
 
-candidateBacktestWorker.on("failed", (job, error) => {
+paperSessionWorker.on("failed", (job, error) => {
   console.error(JSON.stringify({
-    worker: QUEUE_NAMES.candidateBacktest,
+    worker: QUEUE_NAMES.paperSession,
     jobId: job?.id ?? null,
     status: "failed",
     error: error.message,
   }, null, 2));
 });
 
-candidateBacktestWorker.on("completed", (job) => {
+paperSessionWorker.on("completed", (job) => {
   console.log(JSON.stringify({
-    worker: QUEUE_NAMES.candidateBacktest,
+    worker: QUEUE_NAMES.paperSession,
+    jobId: job.id,
+    status: "completed",
+  }, null, 2));
+});
+
+liveSessionWorker.on("failed", (job, error) => {
+  console.error(JSON.stringify({
+    worker: QUEUE_NAMES.liveSession,
+    jobId: job?.id ?? null,
+    status: "failed",
+    error: error.message,
+  }, null, 2));
+});
+
+liveSessionWorker.on("completed", (job) => {
+  console.log(JSON.stringify({
+    worker: QUEUE_NAMES.liveSession,
     jobId: job.id,
     status: "completed",
   }, null, 2));
@@ -272,18 +340,46 @@ candidateBacktestWorker.on("completed", (job) => {
 
 async function main(): Promise<void> {
   await queue.waitUntilReady();
-  await candidateBacktestQueue.waitUntilReady();
+  await paperSessionQueue.waitUntilReady();
+  await liveSessionQueue.waitUntilReady();
   await worker.waitUntilReady();
-  await candidateBacktestWorker.waitUntilReady();
+  await paperSessionWorker.waitUntilReady();
+  await liveSessionWorker.waitUntilReady();
 
   console.log(JSON.stringify({
     worker: QUEUE_NAMES.marketScan,
     status: "ready",
   }, null, 2));
   console.log(JSON.stringify({
-    worker: QUEUE_NAMES.candidateBacktest,
+    worker: QUEUE_NAMES.paperSession,
     status: "ready",
   }, null, 2));
+  console.log(JSON.stringify({
+    worker: QUEUE_NAMES.liveSession,
+    status: "ready",
+  }, null, 2));
+
+  if (scanScheduleEnabled) {
+    console.log(JSON.stringify({
+      worker: QUEUE_NAMES.marketScan,
+      scheduler: "enabled",
+      runOnStart: scanScheduleRunOnStart,
+      scheduleMinutes: scanScheduleMinutes,
+    }, null, 2));
+
+    if (scanScheduleRunOnStart) {
+      await enqueueScheduledScan("schedule");
+    }
+
+    setInterval(() => {
+      void enqueueScheduledScan("schedule");
+    }, scanScheduleMinutes * 60_000);
+  } else {
+    console.log(JSON.stringify({
+      worker: QUEUE_NAMES.marketScan,
+      scheduler: "disabled",
+    }, null, 2));
+  }
 }
 
 await main();

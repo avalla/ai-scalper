@@ -22,6 +22,7 @@ export interface OpenPosition {
   notionalUsd: number;
   entryPrice: number;
   leverage: number;
+  openedAt: number;
   stopLossPrice: number;
   takeProfitPrice: number;
 }
@@ -213,6 +214,23 @@ export function getExitReason(params: {
   return null;
 }
 
+export function buildPositionTargets(params: {
+  action: PositionSide;
+  price: number;
+  stopLossBps: number;
+  takeProfitBps: number;
+}): {
+  stopLossPrice: number;
+  takeProfitPrice: number;
+} {
+  const sideMultiplier = params.action === "long" ? 1 : -1;
+
+  return {
+    stopLossPrice: exitPrice(params.price, params.stopLossBps, -sideMultiplier),
+    takeProfitPrice: exitPrice(params.price, params.takeProfitBps, sideMultiplier),
+  };
+}
+
 export function updatePaperState(params: {
   action: PositionSide;
   leverage: number;
@@ -239,7 +257,12 @@ export function updatePaperState(params: {
   }
 
   const quantity = params.notionalUsd / params.price;
-  const sideMultiplier = params.action === "long" ? 1 : -1;
+  const targets = buildPositionTargets({
+    action: params.action,
+    price: params.price,
+    stopLossBps: params.stopLossBps,
+    takeProfitBps: params.takeProfitBps,
+  });
 
   return {
     lastTradeAt: params.now,
@@ -250,8 +273,9 @@ export function updatePaperState(params: {
       notionalUsd: params.notionalUsd,
       entryPrice: params.price,
       leverage: params.leverage,
-      stopLossPrice: exitPrice(params.price, params.stopLossBps, -sideMultiplier),
-      takeProfitPrice: exitPrice(params.price, params.takeProfitBps, sideMultiplier),
+      openedAt: params.now,
+      stopLossPrice: targets.stopLossPrice,
+      takeProfitPrice: targets.takeProfitPrice,
     },
   };
 }
@@ -336,7 +360,7 @@ export function evaluateAggressivePerpsRisk(params: {
 }): RiskDecision {
   const { symbol, leverage, fundingRateBps, notionalUsd, stopLossBps, limits } = params;
 
-  if (!limits.allowedSymbols.includes(symbol)) {
+  if (limits.allowedSymbols.length > 0 && !limits.allowedSymbols.includes(symbol)) {
     return { allowed: false, reason: "symbol-not-allowed" };
   }
 
@@ -378,7 +402,7 @@ export function selectLeverageForOpportunity(params: {
 } {
   const { policy } = params;
 
-  if (!policy.allowedSymbols.includes(params.symbol)) {
+  if (policy.allowedSymbols.length > 0 && !policy.allowedSymbols.includes(params.symbol)) {
     return {
       leverage: params.configuredLeverage,
       exceptional: false,

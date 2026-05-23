@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__lean-ctx__ctx_read",
+      "mcp__lean-ctx__ctx_shell",
+      "mcp__lean-ctx__ctx_search",
+      "mcp__lean-ctx__ctx_smart_read"
+    ]
+  }
+}

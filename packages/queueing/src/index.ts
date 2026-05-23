@@ -1,11 +1,13 @@
 export const QUEUE_NAMES = {
   marketScan: "market-scan",
-  candidateBacktest: "candidate-backtest",
+  paperSession: "paper-session",
+  liveSession: "live-session",
 } as const;
 
 export const JOB_NAMES = {
   marketScanRun: "market-scan.run",
-  candidateBacktestRun: "candidate-backtest.run",
+  paperSessionStart: "paper-session.start",
+  liveSessionStart: "live-session.start",
 } as const;
 
 export interface MarketScanJobData {
@@ -13,16 +15,13 @@ export interface MarketScanJobData {
   trigger: "manual" | "cli" | "schedule";
 }
 
-export interface CandidateBacktestJobData {
+export interface TraderSessionJobData {
+  entryExecutionMode: "taker" | "maker-entry" | "maker-preferred-with-timeout";
+  paperTrading: boolean;
   requestedAt: string;
-  requestedByJobId: string | null;
-  symbol: string;
-  score: number;
-  netEdgeBps: number;
-  turnover24h: number;
-  minuteRangeBps: number;
-  priorityBucket: "high-liquidity" | "high-volatility" | "standard";
-}
+  tradingProfile: "standard" | "aggressive-perps";
+  trigger: "manual" | "cli" | "schedule";
+ }
 
 export const DEFAULT_JOB_POLICY = {
   attempts: 3,

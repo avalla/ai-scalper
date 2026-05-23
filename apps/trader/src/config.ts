@@ -1,3 +1,16 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import defaultConfig from '../config.json';
+
+type TradingConfig = typeof defaultConfig;
+
+function loadConfig(): TradingConfig {
+  const configFile = process.env.CONFIG_FILE;
+  if (!configFile) return defaultConfig;
+  const resolved = configFile.startsWith('/') ? configFile : join(process.cwd(), configFile);
+  return JSON.parse(readFileSync(resolved, 'utf8')) as TradingConfig;
+}
+
 export interface TraderConfig {
   mode: "trade" | "scan";
   tradingProfile: "standard" | "aggressive-perps";
@@ -5,6 +18,11 @@ export interface TraderConfig {
   entryMakerOffsetTicks: number;
   entryMakerPollMs: number;
   entryMakerTimeoutMs: number;
+  autoSizeFromWallet: boolean;
+  walletAccountType: string;
+  walletCoin: string;
+  walletFraction: number;
+  walletMaxOrderUsdCap: number | null;
   category: string;
   symbol: string;
   pollMs: number;
@@ -20,14 +38,20 @@ export interface TraderConfig {
   maxDailyLossUsd: number;
   maxSpreadBps: number;
   minTradeIntervalMs: number;
+  riskMaxFundingRateBps: number;
   slippageTolerancePercent: number;
   maxTicks: number;
+  tradeScanRefreshMs: number;
+  tradeMinSetupScore: number;
+  tradeMinSetupNetEdgeBps: number;
   aggressiveAllowedSymbols: string[];
   aggressiveRequireScanCandidate: boolean;
   aggressiveScanCandidatesPath: string;
   aggressiveScanLatestPath: string;
   aggressiveScanMaxAgeMinutes: number;
   tradeCandidateSymbols: string[];
+  tickerFailureCooldownTicks: number;
+  tickerFailureThreshold: number;
   aggressiveMaxLeverage: number;
   aggressiveMaxFundingRateBps: number;
   aggressiveMaxLossPerTradeUsd: number;
@@ -40,62 +64,86 @@ export interface TraderConfig {
   exceptionalMinHourlyMoveBps: number;
   exceptionalMinMinuteRangeBps: number;
   exceptionalMinNetEdgeBps: number;
+  exitPolicyMode: "exchange-native" | "logical";
+  exitPolicySafetyDelayMs: number;
+  exitPolicySafetyStopBps: number;
 }
 
 export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderConfig {
+  const cfg = loadConfig();
   return {
     mode: env.TRADER_MODE === "scan" ? "scan" : "trade",
-    tradingProfile: env.TRADING_PROFILE === "aggressive-perps" ? "aggressive-perps" : "standard",
+    tradingProfile:
+      env.TRADING_PROFILE === "aggressive-perps" || env.TRADING_PROFILE === "standard"
+        ? env.TRADING_PROFILE
+        : cfg.tradingProfile as TraderConfig["tradingProfile"],
     entryExecutionMode:
-      env.ENTRY_EXECUTION_MODE === "maker-entry" || env.ENTRY_EXECUTION_MODE === "maker-preferred-with-timeout"
+      env.ENTRY_EXECUTION_MODE === "taker" || env.ENTRY_EXECUTION_MODE === "maker-entry" || env.ENTRY_EXECUTION_MODE === "maker-preferred-with-timeout"
         ? env.ENTRY_EXECUTION_MODE
-        : "taker",
-    entryMakerOffsetTicks: Number(env.ENTRY_MAKER_OFFSET_TICKS || "0"),
-    entryMakerPollMs: Number(env.ENTRY_MAKER_POLL_MS || "250"),
-    entryMakerTimeoutMs: Number(env.ENTRY_MAKER_TIMEOUT_MS || "1500"),
-    category: env.BYBIT_CATEGORY || "linear",
-    symbol: env.BYBIT_SYMBOL || "BTCUSDT",
-    pollMs: Number(env.BYBIT_POLL_MS || "1000"),
-    orderUsd: Number(env.BYBIT_ORDER_USD || "25"),
+        : cfg.entry.executionMode as TraderConfig["entryExecutionMode"],
+    entryMakerOffsetTicks: env.ENTRY_MAKER_OFFSET_TICKS ? Number(env.ENTRY_MAKER_OFFSET_TICKS) : cfg.entry.makerOffsetTicks,
+    entryMakerPollMs: env.ENTRY_MAKER_POLL_MS ? Number(env.ENTRY_MAKER_POLL_MS) : cfg.entry.makerPollMs,
+    entryMakerTimeoutMs: env.ENTRY_MAKER_TIMEOUT_MS ? Number(env.ENTRY_MAKER_TIMEOUT_MS) : cfg.entry.makerTimeoutMs,
+    autoSizeFromWallet: env.AUTO_SIZE_FROM_WALLET ? env.AUTO_SIZE_FROM_WALLET === "true" : cfg.wallet.autoSize,
+    walletAccountType: env.WALLET_ACCOUNT_TYPE || cfg.wallet.accountType,
+    walletCoin: env.WALLET_COIN || cfg.wallet.coin,
+    walletFraction: env.WALLET_FRACTION ? Number(env.WALLET_FRACTION) : cfg.wallet.fraction,
+    walletMaxOrderUsdCap: env.WALLET_MAX_ORDER_USD_CAP
+      ? Number(env.WALLET_MAX_ORDER_USD_CAP)
+      : cfg.wallet.maxOrderUsdCap,
+    category: env.BYBIT_CATEGORY || cfg.bybit.category,
+    symbol: env.BYBIT_SYMBOL || cfg.bybit.symbol,
+    pollMs: env.BYBIT_POLL_MS ? Number(env.BYBIT_POLL_MS) : cfg.bybit.pollMs,
+    orderUsd: env.BYBIT_ORDER_USD ? Number(env.BYBIT_ORDER_USD) : cfg.bybit.orderUsd,
     paperTrading: (env.BYBIT_PAPER_TRADING || "true") === "true",
-    fastWindow: Number(env.STRATEGY_FAST_WINDOW || "5"),
-    slowWindow: Number(env.STRATEGY_SLOW_WINDOW || "20"),
-    thresholdBps: Number(env.STRATEGY_THRESHOLD_BPS || "4"),
-    leverage: Number(env.BYBIT_LEVERAGE || "1"),
-    stopLossBps: Number(env.STRATEGY_STOP_LOSS_BPS || "20"),
-    takeProfitBps: Number(env.STRATEGY_TAKE_PROFIT_BPS || "30"),
-    maxPositionUsd: Number(env.RISK_MAX_POSITION_USD || "100"),
-    maxDailyLossUsd: Number(env.RISK_MAX_DAILY_LOSS_USD || "50"),
-    maxSpreadBps: Number(env.RISK_MAX_SPREAD_BPS || "8"),
-    minTradeIntervalMs: Number(env.RISK_MIN_TRADE_INTERVAL_MS || "15000"),
-    slippageTolerancePercent: Number(env.BYBIT_SLIPPAGE_TOLERANCE_PERCENT || "0.1"),
+    fastWindow: env.STRATEGY_FAST_WINDOW ? Number(env.STRATEGY_FAST_WINDOW) : cfg.strategy.fastWindow,
+    slowWindow: env.STRATEGY_SLOW_WINDOW ? Number(env.STRATEGY_SLOW_WINDOW) : cfg.strategy.slowWindow,
+    thresholdBps: env.STRATEGY_THRESHOLD_BPS ? Number(env.STRATEGY_THRESHOLD_BPS) : cfg.strategy.thresholdBps,
+    leverage: env.BYBIT_LEVERAGE ? Number(env.BYBIT_LEVERAGE) : cfg.bybit.leverage,
+    stopLossBps: env.STRATEGY_STOP_LOSS_BPS ? Number(env.STRATEGY_STOP_LOSS_BPS) : cfg.strategy.stopLossBps,
+    takeProfitBps: env.STRATEGY_TAKE_PROFIT_BPS ? Number(env.STRATEGY_TAKE_PROFIT_BPS) : cfg.strategy.takeProfitBps,
+    maxPositionUsd: env.RISK_MAX_POSITION_USD ? Number(env.RISK_MAX_POSITION_USD) : cfg.risk.maxPositionUsd,
+    maxDailyLossUsd: env.RISK_MAX_DAILY_LOSS_USD ? Number(env.RISK_MAX_DAILY_LOSS_USD) : cfg.risk.maxDailyLossUsd,
+    maxSpreadBps: env.RISK_MAX_SPREAD_BPS ? Number(env.RISK_MAX_SPREAD_BPS) : cfg.risk.maxSpreadBps,
+    minTradeIntervalMs: env.RISK_MIN_TRADE_INTERVAL_MS ? Number(env.RISK_MIN_TRADE_INTERVAL_MS) : cfg.risk.minTradeIntervalMs,
+    riskMaxFundingRateBps: env.RISK_MAX_FUNDING_RATE_BPS ? Number(env.RISK_MAX_FUNDING_RATE_BPS) : cfg.risk.maxFundingRateBps,
+    slippageTolerancePercent: env.BYBIT_SLIPPAGE_TOLERANCE_PERCENT ? Number(env.BYBIT_SLIPPAGE_TOLERANCE_PERCENT) : cfg.bybit.slippageTolerancePercent,
     maxTicks: Number(env.TRADER_MAX_TICKS || "0"),
-    aggressiveAllowedSymbols: (env.AGGRESSIVE_ALLOWED_SYMBOLS || "BTCUSDT,ETHUSDT,SOLUSDT")
-      .split(",")
-      .map((symbol) => symbol.trim())
-      .filter(Boolean),
-    aggressiveRequireScanCandidate: env.AGGRESSIVE_REQUIRE_SCAN_CANDIDATE === "true",
-    aggressiveScanCandidatesPath: env.AGGRESSIVE_SCAN_CANDIDATES_PATH || "apps/trader/data/backtest-candidates.json",
-    aggressiveScanLatestPath: env.AGGRESSIVE_SCAN_LATEST_PATH || "apps/trader/data/scan-latest.json",
-    aggressiveScanMaxAgeMinutes: Number(env.AGGRESSIVE_SCAN_MAX_AGE_MINUTES || "30"),
-    tradeCandidateSymbols: (env.TRADE_CANDIDATE_SYMBOLS || "")
-      .split(",")
-      .map((symbol) => symbol.trim())
-      .filter(Boolean),
-    aggressiveMaxLeverage: Number(env.AGGRESSIVE_MAX_LEVERAGE || "50"),
-    aggressiveMaxFundingRateBps: Number(env.AGGRESSIVE_MAX_FUNDING_RATE_BPS || "8"),
-    aggressiveMaxLossPerTradeUsd: Number(env.AGGRESSIVE_MAX_LOSS_PER_TRADE_USD || "8"),
-    aggressiveMinEstimatedLiqBufferBps: Number(env.AGGRESSIVE_MIN_ESTIMATED_LIQ_BUFFER_BPS || "80"),
-    exceptionalLeverageEnabled: env.EXCEPTIONAL_LEVERAGE_ENABLED === "true",
-    exceptionalAllowedSymbols: (env.EXCEPTIONAL_ALLOWED_SYMBOLS || "BTCUSDT,ETHUSDT")
-      .split(",")
-      .map((symbol) => symbol.trim())
-      .filter(Boolean),
-    exceptionalLeverage: Number(env.EXCEPTIONAL_LEVERAGE || "100"),
-    exceptionalMaxSpreadBps: Number(env.EXCEPTIONAL_MAX_SPREAD_BPS || "0.5"),
-    exceptionalMaxFundingRateBps: Number(env.EXCEPTIONAL_MAX_FUNDING_RATE_BPS || "2"),
-    exceptionalMinHourlyMoveBps: Number(env.EXCEPTIONAL_MIN_HOURLY_MOVE_BPS || "100"),
-    exceptionalMinMinuteRangeBps: Number(env.EXCEPTIONAL_MIN_MINUTE_RANGE_BPS || "20"),
-    exceptionalMinNetEdgeBps: Number(env.EXCEPTIONAL_MIN_NET_EDGE_BPS || "10"),
+    tradeScanRefreshMs: env.TRADE_SCAN_REFRESH_MS ? Number(env.TRADE_SCAN_REFRESH_MS) : cfg.scanner.refreshMs,
+    tradeMinSetupScore: env.TRADE_MIN_SETUP_SCORE ? Number(env.TRADE_MIN_SETUP_SCORE) : cfg.scanner.minSetupScore,
+    tradeMinSetupNetEdgeBps: env.TRADE_MIN_SETUP_NET_EDGE_BPS ? Number(env.TRADE_MIN_SETUP_NET_EDGE_BPS) : cfg.scanner.minSetupNetEdgeBps,
+    aggressiveAllowedSymbols: env.AGGRESSIVE_ALLOWED_SYMBOLS
+      ? env.AGGRESSIVE_ALLOWED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
+      : cfg.aggressive.allowedSymbols,
+    aggressiveRequireScanCandidate: env.AGGRESSIVE_REQUIRE_SCAN_CANDIDATE
+      ? env.AGGRESSIVE_REQUIRE_SCAN_CANDIDATE === "true"
+      : cfg.aggressive.requireScanCandidate,
+    aggressiveScanCandidatesPath: env.AGGRESSIVE_SCAN_CANDIDATES_PATH || cfg.aggressive.scanCandidatesPath,
+    aggressiveScanLatestPath: env.AGGRESSIVE_SCAN_LATEST_PATH || cfg.aggressive.scanLatestPath,
+    aggressiveScanMaxAgeMinutes: env.AGGRESSIVE_SCAN_MAX_AGE_MINUTES ? Number(env.AGGRESSIVE_SCAN_MAX_AGE_MINUTES) : cfg.aggressive.scanMaxAgeMinutes,
+    tradeCandidateSymbols: env.TRADE_CANDIDATE_SYMBOLS
+      ? env.TRADE_CANDIDATE_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
+      : cfg.scanner.candidateSymbols,
+    tickerFailureCooldownTicks: env.TICKER_FAILURE_COOLDOWN_TICKS ? Number(env.TICKER_FAILURE_COOLDOWN_TICKS) : cfg.tickerFailure.cooldownTicks,
+    tickerFailureThreshold: env.TICKER_FAILURE_THRESHOLD ? Number(env.TICKER_FAILURE_THRESHOLD) : cfg.tickerFailure.threshold,
+    aggressiveMaxLeverage: env.AGGRESSIVE_MAX_LEVERAGE ? Number(env.AGGRESSIVE_MAX_LEVERAGE) : cfg.aggressive.maxLeverage,
+    aggressiveMaxFundingRateBps: env.AGGRESSIVE_MAX_FUNDING_RATE_BPS ? Number(env.AGGRESSIVE_MAX_FUNDING_RATE_BPS) : cfg.aggressive.maxFundingRateBps,
+    aggressiveMaxLossPerTradeUsd: env.AGGRESSIVE_MAX_LOSS_PER_TRADE_USD ? Number(env.AGGRESSIVE_MAX_LOSS_PER_TRADE_USD) : cfg.aggressive.maxLossPerTradeUsd,
+    aggressiveMinEstimatedLiqBufferBps: env.AGGRESSIVE_MIN_ESTIMATED_LIQ_BUFFER_BPS ? Number(env.AGGRESSIVE_MIN_ESTIMATED_LIQ_BUFFER_BPS) : cfg.aggressive.minEstimatedLiqBufferBps,
+    exceptionalLeverageEnabled: env.EXCEPTIONAL_LEVERAGE_ENABLED
+      ? env.EXCEPTIONAL_LEVERAGE_ENABLED === "true"
+      : cfg.exceptional.enabled,
+    exceptionalAllowedSymbols: env.EXCEPTIONAL_ALLOWED_SYMBOLS
+      ? env.EXCEPTIONAL_ALLOWED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
+      : cfg.exceptional.allowedSymbols,
+    exceptionalLeverage: env.EXCEPTIONAL_LEVERAGE ? Number(env.EXCEPTIONAL_LEVERAGE) : cfg.exceptional.leverage,
+    exceptionalMaxSpreadBps: env.EXCEPTIONAL_MAX_SPREAD_BPS ? Number(env.EXCEPTIONAL_MAX_SPREAD_BPS) : cfg.exceptional.maxSpreadBps,
+    exceptionalMaxFundingRateBps: env.EXCEPTIONAL_MAX_FUNDING_RATE_BPS ? Number(env.EXCEPTIONAL_MAX_FUNDING_RATE_BPS) : cfg.exceptional.maxFundingRateBps,
+    exceptionalMinHourlyMoveBps: env.EXCEPTIONAL_MIN_HOURLY_MOVE_BPS ? Number(env.EXCEPTIONAL_MIN_HOURLY_MOVE_BPS) : cfg.exceptional.minHourlyMoveBps,
+    exceptionalMinMinuteRangeBps: env.EXCEPTIONAL_MIN_MINUTE_RANGE_BPS ? Number(env.EXCEPTIONAL_MIN_MINUTE_RANGE_BPS) : cfg.exceptional.minMinuteRangeBps,
+    exceptionalMinNetEdgeBps: env.EXCEPTIONAL_MIN_NET_EDGE_BPS ? Number(env.EXCEPTIONAL_MIN_NET_EDGE_BPS) : cfg.exceptional.minNetEdgeBps,
+    exitPolicyMode: cfg.exitPolicy.mode as "exchange-native" | "logical",
+    exitPolicySafetyDelayMs: cfg.exitPolicy.safetyDelayMs,
+    exitPolicySafetyStopBps: cfg.exitPolicy.safetyStopBps,
   };
 }

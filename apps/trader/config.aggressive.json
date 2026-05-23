@@ -1,0 +1,74 @@
+{
+  "tradingProfile": "aggressive-perps",
+  "entry": {
+    "executionMode": "maker-preferred-with-timeout",
+    "makerOffsetTicks": 1,
+    "makerPollMs": 200,
+    "makerTimeoutMs": 2000
+  },
+  "wallet": {
+    "autoSize": false,
+    "accountType": "UNIFIED",
+    "coin": "USDT",
+    "fraction": 1,
+    "maxOrderUsdCap": null
+  },
+  "bybit": {
+    "category": "linear",
+    "symbol": "BTCUSDT",
+    "pollMs": 500,
+    "orderUsd": 10,
+    "leverage": 10,
+    "slippageTolerancePercent": 0.15
+  },
+  "strategy": {
+    "fastWindow": 3,
+    "slowWindow": 10,
+    "thresholdBps": 6,
+    "stopLossBps": 20,
+    "takeProfitBps": 80
+  },
+  "risk": {
+    "maxPositionUsd": 1000,
+    "maxDailyLossUsd": 100,
+    "maxSpreadBps": 5,
+    "minTradeIntervalMs": 5000,
+    "maxFundingRateBps": 12
+  },
+  "scanner": {
+    "refreshMs": 30000,
+    "minSetupScore": 55,
+    "minSetupNetEdgeBps": 20,
+    "candidateSymbols": []
+  },
+  "tickerFailure": {
+    "threshold": 2,
+    "cooldownTicks": 10
+  },
+  "aggressive": {
+    "allowedSymbols": [],
+    "requireScanCandidate": true,
+    "scanCandidatesPath": "apps/trader/data/backtest-candidates.json",
+    "scanLatestPath": "apps/trader/data/scan-latest.json",
+    "scanMaxAgeMinutes": 15,
+    "maxLeverage": 25,
+    "maxFundingRateBps": 12,
+    "maxLossPerTradeUsd": 20,
+    "minEstimatedLiqBufferBps": 50
+  },
+  "exceptional": {
+    "enabled": true,
+    "allowedSymbols": [],
+    "leverage": 50,
+    "maxSpreadBps": 1.0,
+    "maxFundingRateBps": 3,
+    "minHourlyMoveBps": 150,
+    "minMinuteRangeBps": 30,
+    "minNetEdgeBps": 25
+  },
+  "exitPolicy": {
+    "mode": "logical",
+    "safetyDelayMs": 5000,
+    "safetyStopBps": 60
+  }
+}

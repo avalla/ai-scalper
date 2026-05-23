@@ -2,6 +2,7 @@ import {
   createBybitClient,
   type CreateOrderRequest,
   type InstrumentInfo,
+  type PositionInfo,
   type RealtimeOrder,
 } from "@ai-scalper/bybit-client";
 import { mkdir } from "node:fs/promises";
@@ -16,14 +17,25 @@ import {
   type StrategySignal,
   type TraderState,
 } from "@ai-scalper/trading-core";
+import {
+  rankTradeSetups,
+  readScanConfig,
+  type RankedTradeSetup,
+} from "@ai-scalper/market-scanner";
 import type { TraderConfig } from "../config";
 import { buildEntryExecutionPlan } from "./execution-policy";
-import { loadRecentScanCandidatesFromMany } from "./load-scan-candidates";
 import {
-  resolveCandidateSymbols,
-  selectActiveSymbol,
-  type SymbolRuntimeMetrics,
-} from "./select-active-symbol";
+  isSymbolInTickerCooldown,
+  registerTickerFailure,
+  registerTickerSuccess,
+  type SymbolAvailabilityState,
+} from "./symbol-availability";
+import { resolveWalletOrderUsd } from "./wallet-sizing";
+import {
+  createPositionLedger,
+  type ClosedPositionLedgerEntry,
+  type PersistedTraderSnapshot,
+} from "./position-ledger";
 
 function toNumber(value: string): number {
   const parsed = Number(value);
@@ -91,6 +103,7 @@ function toOrderQty(params: {
   return normalizedQty.toFixed(countDecimals(params.instrument.lotSizeFilter.qtyStep));
 }
 
+
 async function executeTrade(params: {
   action: Exclude<StrategySignal, "flat">;
   client: ReturnType<typeof createBybitClient>;
@@ -107,16 +120,73 @@ async function executeTrade(params: {
   fallbackUsed: boolean;
   filled: boolean;
   fillPrice: number;
+  orderLinkId?: string;
+
 }> {
   if (params.reduceOnly || params.config.entryExecutionMode === "taker") {
+    if (params.reduceOnly) {
+      // Close position with a limit maker order at best bid/ask to avoid taker fees.
+      // For a long close (sell): limit at bid1Price — sits at top of book, fills as maker.
+      // For a short close (buy): limit at ask1Price — same logic.
+      const makerClosePrice = params.action === "short"
+        ? (params.tickerBidPrice ?? params.lastPrice.toString())
+        : (params.tickerAskPrice ?? params.lastPrice.toString());
+      const decimals = countDecimals(params.instrument.priceFilter.tickSize);
+      const makerClosePriceStr = Number(makerClosePrice).toFixed(decimals);
+
+      const closeLinkId = crypto.randomUUID();
+      const request: CreateOrderRequest = {
+        category: params.config.category,
+        symbol: params.symbol,
+        side: toOrderSide(params.action),
+        qty: params.qty,
+        orderType: "Limit",
+        price: makerClosePriceStr,
+        timeInForce: "GTC",
+        reduceOnly: true,
+        closeOnTrigger: true,
+        orderLinkId: closeLinkId,
+      };
+
+      if (!params.config.paperTrading) {
+        try {
+          await params.client.createOrder(request);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          if (msg.includes("reduce-only") || msg.includes("position idx not match") || msg.includes("order quantity exceeded lower limit")) {
+            console.log(`[executeTrade] reduce-only limit rejected (position already closed): ${msg}`);
+            return { executionMode: "maker-reduce-only", fallbackUsed: false, filled: true, fillPrice: Number(makerClosePrice) };
+          }
+          throw error;
+        }
+        // Order placed — caller tracks orderLinkId for fill confirmation
+        return {
+          executionMode: "maker-reduce-only",
+          fallbackUsed: false,
+          filled: false,
+          fillPrice: Number(makerClosePrice),
+          orderLinkId: closeLinkId,
+        };
+      }
+
+      // Paper trading: treat as immediate fill
+      return {
+        executionMode: "maker-reduce-only",
+        fallbackUsed: false,
+        filled: true,
+        fillPrice: Number(makerClosePrice),
+      };
+    }
+
+    // Entry taker order with exchange-side TP/SL protection.
     const request: CreateOrderRequest = {
       category: params.config.category,
       symbol: params.symbol,
       side: toOrderSide(params.action),
       qty: params.qty,
       orderType: "Market",
-      reduceOnly: params.reduceOnly,
-      closeOnTrigger: params.reduceOnly,
+      reduceOnly: false,
+      closeOnTrigger: false,
       slippageToleranceType: "Percent",
       slippageTolerance: params.config.slippageTolerancePercent.toString(),
     };
@@ -126,10 +196,11 @@ async function executeTrade(params: {
     }
 
     return {
-      executionMode: params.reduceOnly ? "taker-reduce-only" : "taker",
+      executionMode: "taker",
       fallbackUsed: false,
       filled: true,
       fillPrice: params.lastPrice,
+
     };
   }
 
@@ -192,10 +263,20 @@ async function executeTrade(params: {
       fallbackUsed: false,
       filled: true,
       fillPrice: resolution.fillPrice ?? entryPlan.limitPrice ?? params.lastPrice,
+
     };
   }
 
   if (entryPlan.shouldFallbackToTaker) {
+    // Cancel the unfilled maker order first so Bybit releases the reserved margin
+    await params.client.cancelOrder({
+      category: params.config.category,
+      symbol: params.symbol,
+      orderLinkId,
+    }).catch(() => {
+      // Order may have already been cancelled or filled — proceed with fallback
+    });
+
     await params.client.createOrder({
       category: params.config.category,
       symbol: params.symbol,
@@ -211,6 +292,7 @@ async function executeTrade(params: {
       fallbackUsed: true,
       filled: true,
       fillPrice: params.lastPrice,
+
     };
   }
 
@@ -369,10 +451,61 @@ function getPriceHistory(params: {
   return prices;
 }
 
+function evaluateTopSetupGate(params: {
+  minNetEdgeBps: number;
+  minScore: number;
+  setup: RankedTradeSetup | null;
+}): string | null {
+  const { setup } = params;
+
+  if (!setup) {
+    return "no-ranked-setup";
+  }
+
+  if (setup.score < params.minScore) {
+    return "scan-score-too-low";
+  }
+
+  if (setup.netEdgeBps < params.minNetEdgeBps) {
+    return "scan-edge-too-low";
+  }
+
+  if (setup.action === "flat") {
+    return "scan-action-flat";
+  }
+
+  return null;
+}
+
+function maybeAggressiveLogFields(config: TraderConfig, activeAggressiveAllowedSymbols: string[]): Record<string, unknown> {
+  if (config.tradingProfile !== "aggressive-perps") {
+    return {};
+  }
+
+  return {
+    aggressiveAllowedSymbols: activeAggressiveAllowedSymbols,
+  };
+}
+
+function summarizeTopRankedSetups(setups: RankedTradeSetup[]): Array<Record<string, unknown>> {
+  return setups.slice(0, 5).map((setup) => ({
+    symbol: setup.symbol,
+    action: setup.action,
+    score: setup.score,
+    netEdgeBps: setup.netEdgeBps,
+    trendBps: setup.trendBps,
+    spreadBps: setup.spreadBps,
+    fundingRateBps: setup.fundingRateBps,
+  }));
+}
+
 async function persistRuntimeArtifact(payload: {
   activeSymbol: string;
   candidateSymbols: string[];
+  marketScanGate: string;
+  marketScanGateGeneratedAt: string | null;
   rankedSymbols: string[];
+  rankedSetupsTop: Array<Record<string, unknown>>;
   openPositionSymbol: string | null;
   perSymbol: Record<string, Record<string, unknown>>;
   scanGate: string;
@@ -394,15 +527,75 @@ async function persistRuntimeArtifact(payload: {
   return runtimePath;
 }
 
+function toPersistedTraderSnapshot(params: {
+  openPositionSymbol: string | null;
+  state: TraderState;
+}): PersistedTraderSnapshot {
+  return {
+    lastTradeAt: params.state.lastTradeAt,
+    realizedPnlUsd: params.state.realizedPnlUsd,
+    position: params.state.position,
+    openPositionSymbol: params.openPositionSymbol,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function buildClosedPositionLedgerEntry(params: {
+  exitPrice: number;
+  exitReason: string;
+  nextState: TraderState;
+  previousState: TraderState;
+  previousPosition: NonNullable<TraderState["position"]>;
+  symbol: string;
+}): ClosedPositionLedgerEntry {
+  return {
+    closedAt: new Date().toISOString(),
+    cumulativeRealizedPnlUsd: params.nextState.realizedPnlUsd,
+    entryPrice: params.previousPosition.entryPrice,
+    exitPrice: params.exitPrice,
+    exitReason: params.exitReason,
+    leverage: params.previousPosition.leverage,
+    notionalUsd: params.previousPosition.notionalUsd,
+    openedAt: new Date(params.previousPosition.openedAt).toISOString(),
+    quantity: params.previousPosition.quantity,
+    realizedPnlUsd: params.nextState.realizedPnlUsd - params.previousState.realizedPnlUsd,
+    side: params.previousPosition.side,
+    stopLossPrice: params.previousPosition.stopLossPrice,
+    symbol: params.symbol,
+    takeProfitPrice: params.previousPosition.takeProfitPrice,
+  };
+}
+
+function isLivePositionAligned(params: {
+  livePosition: PositionInfo;
+  persistedSnapshot: PersistedTraderSnapshot;
+}): boolean {
+  const persistedPosition = params.persistedSnapshot.position;
+  if (!persistedPosition) {
+    return false;
+  }
+
+  const liveSize = toNumber(params.livePosition.size);
+  const sideMatches = (
+    (params.livePosition.side === "Buy" && persistedPosition.side === "long")
+    || (params.livePosition.side === "Sell" && persistedPosition.side === "short")
+  );
+
+  return sideMatches && Math.abs(liveSize - persistedPosition.quantity) < 0.000001;
+}
+
 export async function runTrader(config: TraderConfig): Promise<void> {
   const client = createBybitClient();
+  const positionLedger = createPositionLedger();
+  const scanConfig = readScanConfig(process.env);
   const instrumentCache = new Map<string, InstrumentInfo>();
   const configuredLiveLeverageBySymbol = new Map<string, number>();
   const priceHistoryBySymbol = new Map<string, number[]>();
-  const symbolMetrics = new Map<string, SymbolRuntimeMetrics>();
+  const symbolAvailability = new Map<string, SymbolAvailabilityState>();
   const symbolStatuses = new Map<string, {
     action: StrategySignal;
     aggressiveRisk: string;
+    error: string | null;
     fundingRateBps: number;
     lastPrice: number;
     netEdgeBps: number;
@@ -412,66 +605,334 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   }>();
   let ticks = 0;
   let openPositionSymbol: string | null = null;
+  let pendingClose: {
+    orderLinkId: string;
+    exitReason: string;
+    closeAction: Exclude<StrategySignal, "flat">;
+    notionalUsd: number;
+    activeLeverage: number;
+  } | null = null;
   let lastExecution: {
     executionMode: string;
     fallbackUsed: boolean;
     filled: boolean;
     fillPrice: number;
+    orderLinkId?: string;
   } | null = null;
+  let entryTick: number | null = null;
+  let safetyStopPlaced = false;
   let state: TraderState = {
     lastTradeAt: null,
     realizedPnlUsd: 0,
     position: null,
   };
+  try {
+    const persistedSnapshot = await positionLedger.loadSnapshot();
+    if (persistedSnapshot) {
+      let hydratedSnapshot = persistedSnapshot;
 
-  while (config.maxTicks === 0 || ticks < config.maxTicks) {
-    const scanGate = config.tradingProfile === "aggressive-perps" && config.aggressiveRequireScanCandidate
-      ? await loadRecentScanCandidatesFromMany({
-          artifactPaths: [
-            config.aggressiveScanCandidatesPath,
-            config.aggressiveScanLatestPath,
-          ],
-          maxAgeMinutes: config.aggressiveScanMaxAgeMinutes,
-        })
-      : {
-          allowedSymbols: config.aggressiveAllowedSymbols,
-          reason: "ok" as const,
-          generatedAt: null,
-        };
-    const activeAggressiveAllowedSymbols = config.tradingProfile === "aggressive-perps" && config.aggressiveRequireScanCandidate
-      ? config.aggressiveAllowedSymbols.filter((symbol) => scanGate.allowedSymbols.includes(symbol))
-      : config.aggressiveAllowedSymbols;
-    const candidateSymbols = resolveCandidateSymbols({
-      configuredSymbol: config.symbol,
-      tradeCandidateSymbols: config.tradeCandidateSymbols,
-      scanCandidateSymbols: scanGate.reason === "ok" ? scanGate.allowedSymbols : [],
-    });
-    const tradableCandidateSymbols = config.tradingProfile === "aggressive-perps"
-      ? candidateSymbols.filter((symbol) => activeAggressiveAllowedSymbols.includes(symbol))
-      : candidateSymbols;
-    const symbolSelection = selectActiveSymbol({
-      candidateSymbols: tradableCandidateSymbols,
-      fallbackSymbol: candidateSymbols[0] ?? config.symbol,
-      openPositionSymbol,
-      rotationTick: ticks,
-      symbolMetrics: Object.fromEntries(symbolMetrics),
-    });
-    const activeSymbol = symbolSelection.symbol;
-    const instrument = await getInstrument({
-      cache: instrumentCache,
-      category: config.category,
-      client,
-      symbol: activeSymbol,
-    });
+      if (!config.paperTrading && persistedSnapshot.position && persistedSnapshot.openPositionSymbol) {
+        const livePosition = await client.getPosition({
+          category: config.category,
+          symbol: persistedSnapshot.openPositionSymbol,
+        });
+
+        if (!livePosition) {
+          hydratedSnapshot = {
+            ...persistedSnapshot,
+            position: null,
+            openPositionSymbol: null,
+            updatedAt: new Date().toISOString(),
+          };
+          await positionLedger.syncSnapshot(hydratedSnapshot);
+          console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            reconciliation: "cleared-stale-position-snapshot",
+            symbol: persistedSnapshot.openPositionSymbol,
+          }));
+        } else if (!isLivePositionAligned({
+          livePosition,
+          persistedSnapshot,
+        })) {
+          console.warn(JSON.stringify({
+            ts: new Date().toISOString(),
+            reconciliation: "position-snapshot-mismatch",
+            symbol: persistedSnapshot.openPositionSymbol,
+            persistedQuantity: persistedSnapshot.position.quantity,
+            liveQuantity: toNumber(livePosition.size),
+            persistedSide: persistedSnapshot.position.side,
+            liveSide: livePosition.side,
+          }));
+        }
+      }
+
+      state = {
+        lastTradeAt: hydratedSnapshot.lastTradeAt,
+        realizedPnlUsd: hydratedSnapshot.realizedPnlUsd,
+        position: hydratedSnapshot.position,
+      };
+      openPositionSymbol = hydratedSnapshot.openPositionSymbol;
+    }
+    if (!config.paperTrading && config.autoSizeFromWallet && config.walletFraction >= 1 && config.walletMaxOrderUsdCap === null) {
+      console.warn(JSON.stringify({
+        ts: new Date().toISOString(),
+        warning: "live-wallet-uncapped",
+        message: "AUTO_SIZE_FROM_WALLET=true with WALLET_FRACTION>=1 and no WALLET_MAX_ORDER_USD_CAP — full wallet balance will be used as order size. Set WALLET_MAX_ORDER_USD_CAP to limit exposure.",
+      }));
+    }
+
+    let walletSizing = {
+      orderUsd: config.orderUsd,
+      reason: config.paperTrading ? "paper-trading" : "wallet-fallback-config",
+      walletAvailableUsd: null as number | null,
+    };
+    let cachedRankedSetups: RankedTradeSetup[] = [];
+    let lastScanAt = 0;
+    let lastScanGeneratedAt: string | null = null;
+
+    while (config.maxTicks === 0 || ticks < config.maxTicks) {
+      const observedAt = new Date().toISOString();
+      if ((Date.now() - lastScanAt) >= config.tradeScanRefreshMs || cachedRankedSetups.length === 0) {
+        cachedRankedSetups = await rankTradeSetups(scanConfig);
+        lastScanAt = Date.now();
+        lastScanGeneratedAt = observedAt;
+
+        if (!config.paperTrading && config.autoSizeFromWallet) {
+          try {
+            walletSizing = resolveWalletOrderUsd({
+              accountType: config.walletAccountType,
+              autoSizeFromWallet: config.autoSizeFromWallet,
+              fallbackOrderUsd: config.orderUsd,
+              maxOrderUsdCap: config.walletMaxOrderUsdCap,
+              walletBalanceResponse: await client.getWalletBalance(config.walletAccountType),
+              walletCoin: config.walletCoin,
+              walletFraction: config.walletFraction,
+            });
+          } catch {
+            walletSizing = {
+              orderUsd: config.orderUsd,
+              reason: "wallet-request-failed",
+              walletAvailableUsd: null,
+            };
+          }
+        }
+      }
+    const effectiveOrderUsd = walletSizing.orderUsd;
+
+    const resolvedRankedSetups = config.tradeCandidateSymbols.length > 0
+      ? cachedRankedSetups.filter((setup) => config.tradeCandidateSymbols.includes(setup.symbol))
+      : cachedRankedSetups;
+    const activeAggressiveAllowedSymbols = config.aggressiveAllowedSymbols;
+    const rankedSymbols = resolvedRankedSetups.map((setup) => setup.symbol);
+    const selectableCandidateSymbols = rankedSymbols.filter((symbol) => (
+      !isSymbolInTickerCooldown({
+        currentTick: ticks,
+        state: symbolAvailability.get(symbol),
+      })
+    ));
+    const candidateSymbols = selectableCandidateSymbols.length > 0 ? selectableCandidateSymbols : rankedSymbols;
+
+    for (const symbol of rankedSymbols) {
+      if (!isSymbolInTickerCooldown({
+        currentTick: ticks,
+        state: symbolAvailability.get(symbol),
+      })) {
+        continue;
+      }
+
+      const previousStatus = symbolStatuses.get(symbol);
+      symbolStatuses.set(symbol, {
+        action: previousStatus?.action ?? "flat",
+        aggressiveRisk: previousStatus?.aggressiveRisk ?? "unobserved",
+        error: previousStatus?.error ?? "ticker unavailable repeatedly",
+        fundingRateBps: previousStatus?.fundingRateBps ?? 0,
+        lastPrice: previousStatus?.lastPrice ?? 0,
+        netEdgeBps: previousStatus?.netEdgeBps ?? 0,
+        observedAt,
+        risk: "ticker-cooldown",
+        spreadBps: previousStatus?.spreadBps ?? 0,
+      });
+    }
+
+    const activeSymbol: string = openPositionSymbol ?? candidateSymbols[0] ?? config.symbol;
+    const activeSymbolReason = openPositionSymbol
+      ? "open-position"
+      : candidateSymbols.length > 0
+        ? "scan-top"
+        : "fallback";
+    const activeSetup = resolvedRankedSetups.find((setup) => setup.symbol === activeSymbol) ?? null;
+    const marketScanGate = {
+      generatedAt: lastScanGeneratedAt,
+      reason: resolvedRankedSetups.length > 0 ? "ok" : "empty",
+    };
+    const scanGate = {
+      generatedAt: config.tradeCandidateSymbols.length > 0 ? null : lastScanGeneratedAt,
+      reason: config.tradeCandidateSymbols.length > 0 ? "manual-filter" : "live-scan",
+    };
+
+    let instrument: InstrumentInfo;
+    try {
+      instrument = await getInstrument({
+        cache: instrumentCache,
+        category: config.category,
+        client,
+        symbol: activeSymbol,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      symbolStatuses.set(activeSymbol, {
+        action: "flat",
+        aggressiveRisk: "unobserved",
+        error: message,
+        fundingRateBps: 0,
+        lastPrice: 0,
+        netEdgeBps: 0,
+        observedAt,
+        risk: "instrument-unavailable",
+        spreadBps: 0,
+      });
+
+
+
+      const runtimeArtifactPath = await persistRuntimeArtifact({
+        activeSymbol,
+        candidateSymbols: rankedSymbols,
+        rankedSymbols,
+        rankedSetupsTop: summarizeTopRankedSetups(resolvedRankedSetups),
+        openPositionSymbol,
+        perSymbol: Object.fromEntries(rankedSymbols.map((symbol) => {
+          const pricesForSymbol = priceHistoryBySymbol.get(symbol) ?? [];
+          const status = symbolStatuses.get(symbol);
+          return [symbol, {
+            action: status?.action ?? "unobserved",
+            aggressiveRisk: status?.aggressiveRisk ?? "unobserved",
+            error: status?.error ?? null,
+            fundingRateBps: status?.fundingRateBps ?? null,
+            lastPrice: status?.lastPrice ?? null,
+            netEdgeBps: status?.netEdgeBps ?? null,
+            observedAt: status?.observedAt ?? null,
+            risk: status?.risk ?? "unobserved",
+            spreadBps: status?.spreadBps ?? null,
+            pricePoints: pricesForSymbol.length,
+          }];
+        })),
+        scanGate: scanGate.reason,
+        scanGateGeneratedAt: scanGate.generatedAt,
+        tradingProfile: config.tradingProfile,
+        marketScanGate: marketScanGate.reason,
+        marketScanGateGeneratedAt: marketScanGate.generatedAt,
+      });
+
+      console.log(JSON.stringify({
+        ts: observedAt,
+        symbol: activeSymbol,
+        activeSymbolReason,
+        candidateSymbols: rankedSymbols,
+        rankedSymbols,
+        rankedSetupsTop: summarizeTopRankedSetups(resolvedRankedSetups),
+        tradingProfile: config.tradingProfile,
+        marketScanGate: marketScanGate.reason,
+        marketScanGateGeneratedAt: marketScanGate.generatedAt,
+        scanGate: scanGate.reason,
+        scanGateGeneratedAt: scanGate.generatedAt,
+        ...maybeAggressiveLogFields(config, activeAggressiveAllowedSymbols),
+        mode: config.paperTrading ? "paper" : "live",
+        runtimeArtifactPath,
+        error: message,
+        risk: "instrument-unavailable",
+      }));
+
+      ticks += 1;
+      await sleep(config.pollMs);
+      continue;
+    }
     const baseLeverage = clampLeverage(config.leverage, instrument);
-    const ticker = await client.getTicker({
-      category: config.category,
-      symbol: activeSymbol,
-    });
+    let ticker;
+    try {
+      ticker = await client.getTicker({
+        category: config.category,
+        symbol: activeSymbol,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      symbolStatuses.set(activeSymbol, {
+        action: "flat",
+        aggressiveRisk: "unobserved",
+        error: message,
+        fundingRateBps: 0,
+        lastPrice: 0,
+        netEdgeBps: 0,
+        observedAt,
+        risk: "ticker-unavailable",
+        spreadBps: 0,
+      });
+      symbolAvailability.set(activeSymbol, registerTickerFailure({
+        cooldownTicks: config.tickerFailureCooldownTicks,
+        currentTick: ticks,
+        state: symbolAvailability.get(activeSymbol),
+        threshold: config.tickerFailureThreshold,
+      }));
+
+      const runtimeArtifactPath = await persistRuntimeArtifact({
+        activeSymbol,
+        candidateSymbols: rankedSymbols,
+        rankedSymbols,
+        rankedSetupsTop: summarizeTopRankedSetups(resolvedRankedSetups),
+        openPositionSymbol,
+        perSymbol: Object.fromEntries(rankedSymbols.map((symbol) => {
+          const pricesForSymbol = priceHistoryBySymbol.get(symbol) ?? [];
+          const status = symbolStatuses.get(symbol);
+          return [symbol, {
+            action: status?.action ?? "unobserved",
+            aggressiveRisk: status?.aggressiveRisk ?? "unobserved",
+            error: status?.error ?? null,
+            fundingRateBps: status?.fundingRateBps ?? null,
+            lastPrice: status?.lastPrice ?? null,
+            netEdgeBps: status?.netEdgeBps ?? null,
+            observedAt: status?.observedAt ?? null,
+            risk: status?.risk ?? "unobserved",
+            spreadBps: status?.spreadBps ?? null,
+            pricePoints: pricesForSymbol.length,
+          }];
+        })),
+        scanGate: scanGate.reason,
+        scanGateGeneratedAt: scanGate.generatedAt,
+        tradingProfile: config.tradingProfile,
+        marketScanGate: marketScanGate.reason,
+        marketScanGateGeneratedAt: marketScanGate.generatedAt,
+      });
+
+      console.log(JSON.stringify({
+        ts: observedAt,
+        symbol: activeSymbol,
+        activeSymbolReason,
+        candidateSymbols: rankedSymbols,
+        rankedSymbols,
+        rankedSetupsTop: summarizeTopRankedSetups(resolvedRankedSetups),
+        tradingProfile: config.tradingProfile,
+        marketScanGate: marketScanGate.reason,
+        marketScanGateGeneratedAt: marketScanGate.generatedAt,
+        scanGate: scanGate.reason,
+        scanGateGeneratedAt: scanGate.generatedAt,
+        ...maybeAggressiveLogFields(config, activeAggressiveAllowedSymbols),
+        mode: config.paperTrading ? "paper" : "live",
+        runtimeArtifactPath,
+        error: message,
+        risk: "ticker-unavailable",
+      }));
+
+      ticks += 1;
+      await sleep(config.pollMs);
+      continue;
+    }
     const lastPrice = toNumber(ticker.lastPrice);
+    symbolAvailability.set(activeSymbol, registerTickerSuccess(symbolAvailability.get(activeSymbol)));
     const markPrice = toNumber(ticker.markPrice);
     const fundingRateBps = toNumber(ticker.fundingRate) * 10_000;
-    const spreadBps = Math.abs(((lastPrice - markPrice) / markPrice) * 10_000);
+    const bid = toNumber(ticker.bid1Price);
+    const ask = toNumber(ticker.ask1Price);
+    const mid = (bid + ask) / 2;
+    const spreadBps = mid > 0 ? ((ask - bid) / mid) * 10_000 : 0;
 
     const prices = getPriceHistory({
       priceHistoryBySymbol,
@@ -482,15 +943,23 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       prices.shift();
     }
 
-    const action = buildSignal({
-      prices,
-      fastWindow: config.fastWindow,
-      slowWindow: config.slowWindow,
-      thresholdBps: config.thresholdBps,
+    const topSetupGateReason = evaluateTopSetupGate({
+      minNetEdgeBps: config.tradeMinSetupNetEdgeBps,
+      minScore: config.tradeMinSetupScore,
+      setup: activeSetup,
     });
-    const hourlyMoveBps = Math.abs(((lastPrice - toNumber(ticker.prevPrice1h)) / toNumber(ticker.prevPrice1h)) * 10_000);
-    const minuteRangeBps = Math.max(config.takeProfitBps, config.stopLossBps);
-    const netEdgeBps = minuteRangeBps - (config.stopLossBps / 2) - spreadBps;
+    const scanAction = activeSetup?.action ?? "flat";
+    const action = topSetupGateReason ? "flat" : scanAction;
+    // Confirm scanner signal with local MA: only enter when both agree
+    const localSignal = prices.length >= config.slowWindow
+      ? buildSignal({ prices, fastWindow: config.fastWindow, slowWindow: config.slowWindow, thresholdBps: config.thresholdBps })
+      : "flat";
+    const fundingBlocked = Math.abs(fundingRateBps) > config.riskMaxFundingRateBps;
+    const entryAction: StrategySignal = action !== "flat" && action === localSignal && !fundingBlocked ? action : "flat";
+    const hourlyMoveBps = activeSetup?.hourlyMoveBps
+      ?? Math.abs(((lastPrice - toNumber(ticker.prevPrice1h)) / toNumber(ticker.prevPrice1h)) * 10_000);
+    const minuteRangeBps = activeSetup?.minuteRangeBps ?? Math.max(config.takeProfitBps, config.stopLossBps);
+    const netEdgeBps = activeSetup?.netEdgeBps ?? (minuteRangeBps - 16 - spreadBps);
     const leverageDecision = config.exceptionalLeverageEnabled
       ? selectLeverageForOpportunity({
           symbol: activeSymbol,
@@ -523,57 +992,141 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       state,
     });
 
-    if (state.position && exitReason) {
+    // ── Check if a pending limit close order has been filled ─────────────────────
+    if (pendingClose && state.position && !config.paperTrading) {
+      const pendingOrder = await client.getRealtimeOrder({
+        category: config.category,
+        symbol: activeSymbol,
+        orderLinkId: pendingClose.orderLinkId,
+      }).catch(() => null);
+
+      const isFilled = !pendingOrder || pendingOrder.orderStatus === "Filled";
+      const isCancelledOrRejected = pendingOrder?.orderStatus === "Cancelled" || pendingOrder?.orderStatus === "Rejected";
+
+      if (isFilled) {
+        const fillPrice = pendingOrder?.avgPrice ? toNumber(pendingOrder.avgPrice) : lastPrice;
+        lastExecution = { executionMode: "maker-reduce-only", fallbackUsed: false, filled: true, fillPrice };
+        const previousState = state;
+        const previousPosition = state.position;
+        state = updatePaperState({
+          action: pendingClose.closeAction,
+          leverage: pendingClose.activeLeverage,
+          notionalUsd: pendingClose.notionalUsd,
+          price: fillPrice,
+          previous: state,
+          now: Date.now(),
+          stopLossBps: config.stopLossBps,
+          takeProfitBps: config.takeProfitBps,
+          reduceOnly: true,
+        });
+        openPositionSymbol = null;
+        safetyStopPlaced = false;
+        entryTick = null;
+        if (previousPosition) {
+          await positionLedger.appendClosedPosition(buildClosedPositionLedgerEntry({
+            exitPrice: fillPrice,
+            exitReason: pendingClose.exitReason,
+            nextState: state,
+            previousState,
+            previousPosition,
+            symbol: activeSymbol,
+          }));
+        }
+        await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
+          openPositionSymbol,
+          state,
+        }));
+        if (pendingClose.exitReason === "stop-loss" || pendingClose.exitReason === "signal-reversal") {
+          const POST_LOSS_COOLDOWN_TICKS = Math.ceil(config.minTradeIntervalMs / config.pollMs);
+          symbolAvailability.set(activeSymbol, registerTickerFailure({
+            cooldownTicks: POST_LOSS_COOLDOWN_TICKS,
+            currentTick: ticks,
+            state: symbolAvailability.get(activeSymbol),
+            threshold: 1,
+          }));
+        }
+        pendingClose = null;
+      } else if (isCancelledOrRejected) {
+        pendingClose = null; // will resubmit on next tick if exitReason still active
+      }
+      // else: order still open — skip placement below
+    }
+
+    // ── Place close order if position open, exit detected, no pending order ───
+    if (state.position && exitReason && !pendingClose) {
       const closeAction: Exclude<StrategySignal, "flat"> =
         state.position.side === "long" ? "short" : "long";
       const closeQty = state.position.quantity.toFixed(
         countDecimals(instrument.lotSizeFilter.qtyStep),
       );
 
-      if (!config.paperTrading) {
-        lastExecution = await executeTrade({
-          action: closeAction,
-          client,
-          config,
-          instrument,
-          lastPrice,
-          symbol: activeSymbol,
-          tickerBidPrice: ticker.bid1Price,
-          tickerAskPrice: ticker.ask1Price,
-          qty: closeQty,
-          reduceOnly: true,
-        });
-      } else {
-        lastExecution = await executeTrade({
-          action: closeAction,
-          client,
-          config,
-          instrument,
-          lastPrice,
-          symbol: activeSymbol,
-          tickerBidPrice: ticker.bid1Price,
-          tickerAskPrice: ticker.ask1Price,
-          qty: closeQty,
-          reduceOnly: true,
-        });
-      }
-
-      const closeExecution = lastExecution;
-      state = updatePaperState({
+      lastExecution = await executeTrade({
         action: closeAction,
-        leverage: activeLeverage,
-        notionalUsd: state.position.notionalUsd,
-        price: closeExecution.fillPrice,
-        previous: state,
-        now: Date.now(),
-        stopLossBps: config.stopLossBps,
-        takeProfitBps: config.takeProfitBps,
+        client,
+        config,
+        instrument,
+        lastPrice,
+        symbol: activeSymbol,
+        tickerBidPrice: ticker.bid1Price,
+        tickerAskPrice: ticker.ask1Price,
+        qty: closeQty,
         reduceOnly: true,
       });
-      openPositionSymbol = null;
+
+      if (lastExecution.filled) {
+        // Paper trade or position-already-closed edge case: settle immediately
+        const previousState = state;
+        const previousPosition = state.position;
+        state = updatePaperState({
+          action: closeAction,
+          leverage: activeLeverage,
+          notionalUsd: state.position.notionalUsd,
+          price: lastExecution.fillPrice,
+          previous: state,
+          now: Date.now(),
+          stopLossBps: config.stopLossBps,
+          takeProfitBps: config.takeProfitBps,
+          reduceOnly: true,
+        });
+        openPositionSymbol = null;
+        safetyStopPlaced = false;
+        entryTick = null;
+        if (previousPosition) {
+          await positionLedger.appendClosedPosition(buildClosedPositionLedgerEntry({
+            exitPrice: lastExecution.fillPrice,
+            exitReason,
+            nextState: state,
+            previousState,
+            previousPosition,
+            symbol: activeSymbol,
+          }));
+        }
+        await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
+          openPositionSymbol,
+          state,
+        }));
+        if (exitReason === "stop-loss" || exitReason === "signal-reversal") {
+          const POST_LOSS_COOLDOWN_TICKS = Math.ceil(config.minTradeIntervalMs / config.pollMs);
+          symbolAvailability.set(activeSymbol, registerTickerFailure({
+            cooldownTicks: POST_LOSS_COOLDOWN_TICKS,
+            currentTick: ticks,
+            state: symbolAvailability.get(activeSymbol),
+            threshold: 1,
+          }));
+        }
+      } else if (lastExecution.orderLinkId) {
+        // Limit close order placed — track for fill confirmation
+        pendingClose = {
+          orderLinkId: lastExecution.orderLinkId,
+          exitReason,
+          closeAction,
+          notionalUsd: state.position.notionalUsd,
+          activeLeverage,
+        };
+      }
     }
 
-    const notionalUsd = computeNotionalUsd(config.orderUsd, activeLeverage);
+    const notionalUsd = computeNotionalUsd(effectiveOrderUsd, activeLeverage);
     const risk = evaluateRisk({
       action,
       limits: {
@@ -606,18 +1159,11 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           },
         })
       : { allowed: true as const };
-    const observedAt = new Date().toISOString();
 
-    symbolMetrics.set(activeSymbol, {
-      hourlyMoveBps,
-      netEdgeBps,
-      spreadBps,
-      fundingRateBps,
-      observedAt,
-    });
     symbolStatuses.set(activeSymbol, {
       action,
       aggressiveRisk: aggressiveRisk.allowed ? "allowed" : aggressiveRisk.reason,
+      error: null,
       fundingRateBps,
       lastPrice,
       netEdgeBps,
@@ -626,7 +1172,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       spreadBps,
     });
 
-    if (action !== "flat" && !state.position && risk.allowed && aggressiveRisk.allowed) {
+    if (entryAction !== "flat" && !state.position && risk.allowed && aggressiveRisk.allowed) {
       const qty = toOrderQty({
         instrument,
         notionalUsd,
@@ -649,7 +1195,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         }
       }
       lastExecution = await executeTrade({
-        action,
+        action: entryAction as Exclude<StrategySignal, "flat">,
         client,
         config,
         instrument,
@@ -663,7 +1209,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       const entryExecution = lastExecution;
       if (entryExecution && entryExecution.filled) {
         state = updatePaperState({
-          action,
+          action: entryAction as Exclude<StrategySignal, "flat">,
           leverage: activeLeverage,
           notionalUsd,
           price: entryExecution.fillPrice,
@@ -673,20 +1219,78 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           takeProfitBps: config.takeProfitBps,
         });
         openPositionSymbol = activeSymbol;
+        entryTick = ticks;
+        await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
+          openPositionSymbol,
+          state,
+        }));
       }
     }
 
+    // ── Delayed safety stop (logical mode only) ─────────────────────────
+    if (state.position && entryTick !== null && !safetyStopPlaced && config.exitPolicyMode === "logical" && !config.paperTrading) {
+      const ticksSinceEntry = ticks - entryTick;
+      const safetyDelayTicks = Math.ceil(config.exitPolicySafetyDelayMs / config.pollMs);
+      if (ticksSinceEntry >= safetyDelayTicks) {
+        const safetyStopPrice = state.position.side === "long"
+          ? lastPrice * (1 - config.exitPolicySafetyStopBps / 10000)
+          : lastPrice * (1 + config.exitPolicySafetyStopBps / 10000);
+        const decimals = countDecimals(instrument.priceFilter.tickSize);
+        const safetyStopPriceStr = safetyStopPrice.toFixed(decimals);
+        await client.setTradingStop({
+          category: config.category,
+          symbol: activeSymbol,
+          stopLoss: safetyStopPriceStr,
+          positionIdx: state.position.side === "long" ? 1 : 2,
+        }).catch((err: Error) => {
+          console.log(`[safetyStop] failed: ${err.message}`);
+        });
+        console.log(JSON.stringify({
+          action: "safety-stop",
+          side: state.position.side,
+          entryPrice: state.position.entryPrice,
+          safetyStopPrice: safetyStopPriceStr,
+          exitPolicySafetyStopBps: config.exitPolicySafetyStopBps,
+          ticksSinceEntry,
+        }));
+        safetyStopPlaced = true;
+      }
+    }
+
+    const intent = exitReason
+      ? "close"
+      : action === "long"
+        ? "open-long"
+        : action === "short"
+          ? "open-short"
+          : "no-entry";
+    const intentReason = exitReason
+      ? exitReason
+      : state.position
+        ? "position-open"
+        : topSetupGateReason
+          ? topSetupGateReason
+        : !risk.allowed
+          ? risk.reason
+          : !aggressiveRisk.allowed
+            ? aggressiveRisk.reason
+            : lastExecution?.filled === false
+              ? "entry-not-filled"
+              : "ready";
+
     const runtimeArtifactPath = await persistRuntimeArtifact({
       activeSymbol,
-      candidateSymbols: tradableCandidateSymbols.length > 0 ? tradableCandidateSymbols : candidateSymbols,
-      rankedSymbols: symbolSelection.rankedSymbols,
+      candidateSymbols: rankedSymbols,
+      rankedSymbols,
+      rankedSetupsTop: summarizeTopRankedSetups(resolvedRankedSetups),
       openPositionSymbol,
-      perSymbol: Object.fromEntries((tradableCandidateSymbols.length > 0 ? tradableCandidateSymbols : candidateSymbols).map((symbol) => {
+      perSymbol: Object.fromEntries(rankedSymbols.map((symbol) => {
         const pricesForSymbol = priceHistoryBySymbol.get(symbol) ?? [];
         const status = symbolStatuses.get(symbol);
         return [symbol, {
           action: status?.action ?? "unobserved",
           aggressiveRisk: status?.aggressiveRisk ?? "unobserved",
+          error: status?.error ?? null,
           fundingRateBps: status?.fundingRateBps ?? null,
           lastPrice: status?.lastPrice ?? null,
           netEdgeBps: status?.netEdgeBps ?? null,
@@ -699,28 +1303,42 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       scanGate: scanGate.reason,
       scanGateGeneratedAt: scanGate.generatedAt,
       tradingProfile: config.tradingProfile,
+      marketScanGate: marketScanGate.reason,
+      marketScanGateGeneratedAt: marketScanGate.generatedAt,
     });
 
     console.log(JSON.stringify({
       ts: new Date().toISOString(),
       symbol: activeSymbol,
-      activeSymbolReason: symbolSelection.reason,
-      candidateSymbols: tradableCandidateSymbols.length > 0 ? tradableCandidateSymbols : candidateSymbols,
-      rankedSymbols: symbolSelection.rankedSymbols,
+      activeSymbolReason,
+      candidateSymbols: rankedSymbols,
+      rankedSymbols,
+      rankedSetupsTop: summarizeTopRankedSetups(resolvedRankedSetups),
       lastPrice,
       markPrice,
       ticks: prices.length,
       action,
+      intent,
+      intentReason,
+      scanScore: activeSetup?.score ?? null,
+      scanNetEdgeBps: activeSetup?.netEdgeBps ?? null,
+      scanTrendBps: activeSetup?.trendBps ?? null,
       leverage: activeLeverage,
       baseLeverage,
+      effectiveOrderUsd,
+      walletAvailableUsd: walletSizing.walletAvailableUsd,
+      walletSizingReason: walletSizing.reason,
       leverageDecision: leverageDecision.reason,
       exceptionalLeverage: leverageDecision.exceptional,
       entryExecutionMode: config.entryExecutionMode,
       lastExecution,
+
       tradingProfile: config.tradingProfile,
+      marketScanGate: marketScanGate.reason,
+      marketScanGateGeneratedAt: marketScanGate.generatedAt,
       scanGate: scanGate.reason,
       scanGateGeneratedAt: scanGate.generatedAt,
-      aggressiveAllowedSymbols: activeAggressiveAllowedSymbols,
+      ...maybeAggressiveLogFields(config, activeAggressiveAllowedSymbols),
       fundingRateBps,
       realizedPnlUsd: state.realizedPnlUsd,
       exitReason,
@@ -733,5 +1351,8 @@ export async function runTrader(config: TraderConfig): Promise<void> {
 
     ticks += 1;
     await sleep(config.pollMs);
+  }
+  } finally {
+    await positionLedger.close();
   }
 }
