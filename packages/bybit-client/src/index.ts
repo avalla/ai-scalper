@@ -347,7 +347,7 @@ export function createBybitClient(options: BybitClientOptions = {}) {
       if (data.retCode !== 0) {
         throw new Error(`Bybit wallet balance failed: ${data.retMsg}`);
       }
-      return data.result;
+      return data;
     },
 
     async setLeverage(request: SetLeverageRequest): Promise<{ alreadySet: boolean }> {
