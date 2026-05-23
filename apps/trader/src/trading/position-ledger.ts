@@ -38,7 +38,11 @@ export interface ClosedPositionLedgerEntry {
   /** Bandit champion variant that was active at entry — for per-variant attribution. */
   championIdAtEntry?: string | null;
   /** Strategy that produced this trade. Optional for backward-compat with old ledger entries. */
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb";
+  /** Basis (bps) at entry — present for basis-arb trades, undefined otherwise. */
+  basisEntryBps?: number;
+  /** Basis (bps) at exit — present for basis-arb trades, undefined otherwise. */
+  basisExitBps?: number;
   side: OpenPosition["side"];
   stopLossPrice: number;
   symbol: string;

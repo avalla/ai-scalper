@@ -60,6 +60,11 @@ import {
 } from "./position-ledger";
 import { fundingArbDecide } from "../strategies/funding-arb";
 import { longerTfSignal, type LongerTfKlineCache } from "../strategies/longer-tf";
+import {
+  basisArbDecide,
+  computeBasisBps,
+  type BasisPosition,
+} from "../strategies/basis-arb";
 
 function toNumber(value: string): number {
   const parsed = Number(value);
@@ -631,7 +636,9 @@ function buildClosedPositionLedgerEntry(params: {
   symbol: string;
   feeRoundTripBps: number;
   championIdAtEntry?: string | null;
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb";
+  basisEntryBps?: number;
+  basisExitBps?: number;
 }): ClosedPositionLedgerEntry {
   const netPnl = params.nextState.realizedPnlUsd - params.previousState.realizedPnlUsd;
   const feeUsd = params.feeRoundTripBps > 0
@@ -653,6 +660,8 @@ function buildClosedPositionLedgerEntry(params: {
     feeUsd,
     championIdAtEntry: params.championIdAtEntry ?? null,
     strategyType: params.strategyType,
+    basisEntryBps: params.basisEntryBps,
+    basisExitBps: params.basisExitBps,
     side: params.previousPosition.side,
     stopLossPrice: params.previousPosition.stopLossPrice,
     symbol: params.symbol,
@@ -1050,6 +1059,417 @@ async function runAlternativeStrategyTick(params: {
   return { shouldContinueLoop: true };
 }
 
+/**
+ * Basis-arbitrage tick: spot + perp two-leg market-neutral spread.
+ *
+ * Safety invariant for v1: if leg-1 fills and leg-2 fails, we IMMEDIATELY
+ * submit a compensating close on leg-1 (best-effort, market reduceOnly on
+ * perp / market opposite on spot) so we never end up with naked directional
+ * exposure. The compensation attempt is logged + alerted; if it ALSO fails,
+ * a critical alert is emitted and the position is NOT recorded in trader
+ * state (the operator must reconcile manually).
+ *
+ * PnL is approximated as the sum of the per-leg paper PnL plus an
+ * approximate funding accrual: `notional × |fundingRate| × holdMs / 8h`
+ * (positive sign in our favor, since we're always on the receiving side of
+ * funding when basis > 0 and entering opposite directions).
+ */
+async function runBasisArbTick(params: {
+  alerter: WebhookAlerter;
+  client: ReturnType<typeof createBybitClient>;
+  config: TraderConfig;
+  getInstrument: (symbol: string) => Promise<InstrumentInfo>;
+  observedAt: string;
+  basisPositionRef: MutableRef<BasisPosition | null>;
+  basisEntryPerpPriceRef: MutableRef<number | null>;
+  basisEntrySpotPriceRef: MutableRef<number | null>;
+  basisEntryQtyRef: MutableRef<number | null>;
+  basisFundingRateAtEntryRef: MutableRef<number | null>;
+  positionLedger: ReturnType<typeof createPositionLedger>;
+  stateRef: MutableRef<TraderState>;
+  openPositionSymbolRef: MutableRef<string | null>;
+  toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
+}): Promise<{ shouldContinueLoop: boolean }> {
+  const { config, client, stateRef, openPositionSymbolRef, basisPositionRef } = params;
+  const symbol = config.symbol;
+
+  let instrument: InstrumentInfo;
+  try {
+    instrument = await params.getInstrument(symbol);
+  } catch (error) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "basis-arb",
+      symbol,
+      event: "instrument-unavailable",
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // Fetch both tickers.
+  let perpTicker;
+  let spotTicker;
+  try {
+    perpTicker = await client.getTicker({ category: "linear", symbol });
+  } catch (error) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "basis-arb",
+      symbol,
+      event: "perp-ticker-unavailable",
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    return { shouldContinueLoop: true };
+  }
+  try {
+    spotTicker = await client.getTicker({ category: "spot", symbol });
+  } catch (error) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "basis-arb",
+      symbol,
+      event: "spot-ticker-unavailable",
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  const perpPrice = Number(perpTicker.lastPrice);
+  const spotPrice = Number(spotTicker.lastPrice);
+  const fundingRateBps = Number(perpTicker.fundingRate) * 10_000;
+
+  if (!Number.isFinite(perpPrice) || perpPrice <= 0 || !Number.isFinite(spotPrice) || spotPrice <= 0) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "basis-arb",
+      symbol,
+      event: "invalid-prices",
+      perpPrice,
+      spotPrice,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  const decision = basisArbDecide({
+    spotPrice,
+    perpPrice,
+    now: Date.now(),
+    position: basisPositionRef.get(),
+    config: {
+      entryThresholdBps: config.basisArbEntryThresholdBps,
+      exitThresholdBps: config.basisArbExitThresholdBps,
+      maxHoldMinutes: config.basisArbMaxHoldMinutes,
+    },
+  });
+
+  const currentBasisBps = computeBasisBps(spotPrice, perpPrice);
+
+  if (decision.kind === "hold") {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      event: "tick-basis-arb",
+      symbol,
+      perpPrice,
+      spotPrice,
+      basisBps: currentBasisBps,
+      fundingRateBps,
+      decision: "hold",
+      reason: decision.reason,
+      position: basisPositionRef.get(),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // ── ENTRY ────────────────────────────────────────────────────────────────
+  if (decision.kind === "enter") {
+    const notionalUsd = config.basisArbMaxNotionalUsd;
+    const qtyStep = Number(instrument.lotSizeFilter.qtyStep);
+    const rawQty = notionalUsd / perpPrice;
+    const normalizedQty = Math.floor(rawQty / qtyStep) * qtyStep;
+    const minQty = Number(instrument.lotSizeFilter.minOrderQty);
+    if (normalizedQty < minQty) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        strategyType: "basis-arb",
+        symbol,
+        event: "qty-below-min",
+        normalizedQty,
+        minQty,
+      }));
+      return { shouldContinueLoop: true };
+    }
+    const qtyStr = normalizedQty.toFixed(countDecimals(instrument.lotSizeFilter.qtyStep));
+    const perpOrderSide: "Buy" | "Sell" = decision.perpSide === "long" ? "Buy" : "Sell";
+    const spotOrderSide: "Buy" | "Sell" = decision.spotSide === "long" ? "Buy" : "Sell";
+
+    if (config.paperTrading) {
+      // Paper mode: simulate both fills at current mid prices.
+      const now = Date.now();
+      basisPositionRef.set({
+        perpSide: decision.perpSide,
+        spotSide: decision.spotSide,
+        entryBasisBps: decision.basisBps,
+        entryAt: now,
+      });
+      params.basisEntryPerpPriceRef.set(perpPrice);
+      params.basisEntrySpotPriceRef.set(spotPrice);
+      params.basisEntryQtyRef.set(normalizedQty);
+      params.basisFundingRateAtEntryRef.set(fundingRateBps);
+      openPositionSymbolRef.set(symbol);
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "basis-arb-enter-paper",
+        symbol,
+        perpSide: decision.perpSide,
+        spotSide: decision.spotSide,
+        qty: qtyStr,
+        perpPrice,
+        spotPrice,
+        basisBps: decision.basisBps,
+        fundingRateBps,
+      }));
+      return { shouldContinueLoop: true };
+    }
+
+    // ── LIVE two-leg execution ───────────────────────────────────────────
+    // Order matters: place perp first (faster, deterministic) then spot.
+    // If spot fails, we close perp immediately to avoid naked exposure.
+    const perpReq: CreateOrderRequest = {
+      category: "linear",
+      symbol,
+      side: perpOrderSide,
+      qty: qtyStr,
+      orderType: "Market",
+    };
+    let perpOrderId: string | undefined;
+    try {
+      const perpResp = await client.createOrder(perpReq);
+      perpOrderId = perpResp.orderId;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "basis-arb-perp-leg-failed",
+        symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      await params.alerter.send(
+        `basis-arb perp leg failed (no exposure): symbol=${symbol} side=${perpOrderSide} qty=${qtyStr}`,
+      ).catch(() => {});
+      return { shouldContinueLoop: true };
+    }
+
+    // Perp filled — now spot.
+    const spotReq: CreateOrderRequest = {
+      category: "spot",
+      symbol,
+      side: spotOrderSide,
+      qty: qtyStr,
+      orderType: "Market",
+    };
+    try {
+      await client.createOrder(spotReq);
+    } catch (err) {
+      // Spot failed → CLOSE THE PERP LEG IMMEDIATELY (naked-exposure guard).
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "basis-arb-spot-leg-failed-closing-perp",
+        symbol,
+        perpOrderId,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      const compensateSide: "Buy" | "Sell" = perpOrderSide === "Buy" ? "Sell" : "Buy";
+      try {
+        await client.createOrder({
+          category: "linear",
+          symbol,
+          side: compensateSide,
+          qty: qtyStr,
+          orderType: "Market",
+          reduceOnly: true,
+        });
+        await params.alerter.send(
+          `basis-arb: spot leg failed, perp compensated — symbol=${symbol} closed perp leg (qty=${qtyStr}) to avoid naked exposure`,
+        ).catch(() => {});
+      } catch (compErr) {
+        // CRITICAL: naked perp exposure. Alert loudly.
+        await params.alerter.send(
+          `CRITICAL: basis-arb naked exposure — manual reconcile required: symbol=${symbol} perpOrderId=${perpOrderId} qty=${qtyStr} compensateErr=${
+            compErr instanceof Error ? compErr.message : String(compErr)
+          }`,
+        ).catch(() => {});
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "basis-arb-naked-exposure",
+          symbol,
+          perpOrderId,
+          qty: qtyStr,
+        }));
+      }
+      return { shouldContinueLoop: true };
+    }
+
+    // Both legs filled.
+    const now = Date.now();
+    basisPositionRef.set({
+      perpSide: decision.perpSide,
+      spotSide: decision.spotSide,
+      entryBasisBps: decision.basisBps,
+      entryAt: now,
+    });
+    params.basisEntryPerpPriceRef.set(perpPrice);
+    params.basisEntrySpotPriceRef.set(spotPrice);
+    params.basisEntryQtyRef.set(normalizedQty);
+    params.basisFundingRateAtEntryRef.set(fundingRateBps);
+    openPositionSymbolRef.set(symbol);
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      event: "basis-arb-enter-live",
+      symbol,
+      perpSide: decision.perpSide,
+      spotSide: decision.spotSide,
+      qty: qtyStr,
+      perpPrice,
+      spotPrice,
+      basisBps: decision.basisBps,
+      fundingRateBps,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // ── EXIT ─────────────────────────────────────────────────────────────────
+  const pos = basisPositionRef.get();
+  if (!pos) return { shouldContinueLoop: true };
+
+  const entryQty = params.basisEntryQtyRef.get() ?? 0;
+  const entryPerp = params.basisEntryPerpPriceRef.get() ?? perpPrice;
+  const entrySpot = params.basisEntrySpotPriceRef.get() ?? spotPrice;
+  const entryFundingBps = params.basisFundingRateAtEntryRef.get() ?? 0;
+  const qtyStr = entryQty.toFixed(countDecimals(instrument.lotSizeFilter.qtyStep));
+
+  // Per-leg PnL (per unit × qty). Long leg profits when price rises; short profits when it falls.
+  const perpLegPnl = (pos.perpSide === "long" ? perpPrice - entryPerp : entryPerp - perpPrice) * entryQty;
+  const spotLegPnl = (pos.spotSide === "long" ? spotPrice - entrySpot : entrySpot - spotPrice) * entryQty;
+  // Funding approximation: notional × |fundingBps/10000| × holdMs / (8h ms).
+  const notional = entryQty * entryPerp;
+  const holdMs = Date.now() - pos.entryAt;
+  const fundingApprox = notional * (Math.abs(entryFundingBps) / 10_000) * (holdMs / 28_800_000);
+  // Fees (round-trip configured): charge once per leg.
+  const feeRoundTripBps = config.feeRoundTripBps;
+  const feePerLeg = notional * (feeRoundTripBps / 10_000);
+  const netPnl = perpLegPnl + spotLegPnl + fundingApprox - 2 * feePerLeg;
+
+  if (!config.paperTrading) {
+    // Close both legs (best-effort; both as market). If either fails we log + alert
+    // but still record the state-side close to avoid runaway tracking.
+    const perpCloseSide: "Buy" | "Sell" = pos.perpSide === "long" ? "Sell" : "Buy";
+    const spotCloseSide: "Buy" | "Sell" = pos.spotSide === "long" ? "Sell" : "Buy";
+    let perpClosed = false;
+    let spotClosed = false;
+    try {
+      await client.createOrder({
+        category: "linear",
+        symbol,
+        side: perpCloseSide,
+        qty: qtyStr,
+        orderType: "Market",
+        reduceOnly: true,
+      });
+      perpClosed = true;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "basis-arb-perp-exit-failed",
+        symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    try {
+      await client.createOrder({
+        category: "spot",
+        symbol,
+        side: spotCloseSide,
+        qty: qtyStr,
+        orderType: "Market",
+      });
+      spotClosed = true;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "basis-arb-spot-exit-failed",
+        symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    if (!perpClosed || !spotClosed) {
+      await params.alerter.send(
+        `basis-arb exit incomplete — manual reconcile: symbol=${symbol} perpClosed=${perpClosed} spotClosed=${spotClosed} qty=${qtyStr}`,
+      ).catch(() => {});
+    }
+  }
+
+  // Update state and record ledger entry.
+  const previousState = stateRef.get();
+  const nextState: TraderState = {
+    ...previousState,
+    realizedPnlUsd: previousState.realizedPnlUsd + netPnl,
+    lastTradeAt: Date.now(),
+    position: null,
+  };
+  stateRef.set(nextState);
+  basisPositionRef.set(null);
+  params.basisEntryPerpPriceRef.set(null);
+  params.basisEntrySpotPriceRef.set(null);
+  params.basisEntryQtyRef.set(null);
+  params.basisFundingRateAtEntryRef.set(null);
+  openPositionSymbolRef.set(null);
+
+  // Build a synthetic ledger entry (basis-arb has no SL/TP — set to 0).
+  const ledgerEntry: ClosedPositionLedgerEntry = {
+    closedAt: new Date().toISOString(),
+    cumulativeRealizedPnlUsd: nextState.realizedPnlUsd,
+    entryPrice: entryPerp,
+    exitPrice: perpPrice,
+    exitReason: decision.reason,
+    leverage: 1,
+    notionalUsd: notional,
+    openedAt: new Date(pos.entryAt).toISOString(),
+    quantity: entryQty,
+    realizedPnlUsd: netPnl,
+    grossPnlUsd: perpLegPnl + spotLegPnl + fundingApprox,
+    feeUsd: 2 * feePerLeg,
+    championIdAtEntry: null,
+    strategyType: "basis-arb",
+    basisEntryBps: pos.entryBasisBps,
+    basisExitBps: currentBasisBps,
+    side: pos.perpSide,
+    stopLossPrice: 0,
+    symbol,
+    takeProfitPrice: 0,
+  };
+  await params.positionLedger.appendClosedPosition(ledgerEntry);
+  await params.positionLedger.syncSnapshot(params.toPersistedTraderSnapshot({
+    openPositionSymbol: null,
+    state: nextState,
+  }));
+
+  console.log(JSON.stringify({
+    ts: params.observedAt,
+    event: "basis-arb-exit",
+    symbol,
+    reason: decision.reason,
+    entryBasisBps: pos.entryBasisBps,
+    exitBasisBps: currentBasisBps,
+    perpLegPnl,
+    spotLegPnl,
+    fundingApprox,
+    feeUsd: 2 * feePerLeg,
+    netPnl,
+  }));
+
+  return { shouldContinueLoop: true };
+}
+
 export async function runTrader(config: TraderConfig): Promise<void> {
   await mkdir(resolveProjectPath("apps/trader/data/runtime"), { recursive: true });
   acquireSessionLock();
@@ -1218,6 +1638,12 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     // ── Phase-2 strategy state ──────────────────────────────────────────────
     let fundingTargetForOpenPosition: number | null = null;
     const longerTfKlineCacheBySymbol: Map<string, LongerTfKlineCache> = new Map();
+    // basis-arb state
+    let basisArbPosition: BasisPosition | null = null;
+    let basisArbEntryPerpPrice: number | null = null;
+    let basisArbEntrySpotPrice: number | null = null;
+    let basisArbEntryQty: number | null = null;
+    let basisArbFundingRateAtEntry: number | null = null;
     let cachedRankedSetups: RankedTradeSetup[] = [];
     let lastScanAt = 0;
     let lastScanGeneratedAt: string | null = null;
@@ -1247,6 +1673,54 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       state = rolloverDailyPnlIfNeeded(state, Date.now());
 
       // ── Strategy dispatch: non-MA strategies short-circuit the MA loop. ──
+      if (config.strategyType === "basis-arb") {
+        const handled = await runBasisArbTick({
+          alerter,
+          client,
+          config,
+          getInstrument: (symbol) => getInstrument({
+            cache: instrumentCache,
+            category: "linear",
+            client,
+            symbol,
+          }),
+          observedAt,
+          basisPositionRef: {
+            get: () => basisArbPosition,
+            set: (v) => { basisArbPosition = v; },
+          },
+          basisEntryPerpPriceRef: {
+            get: () => basisArbEntryPerpPrice,
+            set: (v) => { basisArbEntryPerpPrice = v; },
+          },
+          basisEntrySpotPriceRef: {
+            get: () => basisArbEntrySpotPrice,
+            set: (v) => { basisArbEntrySpotPrice = v; },
+          },
+          basisEntryQtyRef: {
+            get: () => basisArbEntryQty,
+            set: (v) => { basisArbEntryQty = v; },
+          },
+          basisFundingRateAtEntryRef: {
+            get: () => basisArbFundingRateAtEntry,
+            set: (v) => { basisArbFundingRateAtEntry = v; },
+          },
+          positionLedger,
+          stateRef: {
+            get: () => state,
+            set: (v) => { state = v; },
+          },
+          openPositionSymbolRef: {
+            get: () => openPositionSymbol,
+            set: (v) => { openPositionSymbol = v; },
+          },
+          toPersistedTraderSnapshot: (p) => toPersistedTraderSnapshot(p),
+        });
+        ticks += 1;
+        if (!handled.shouldContinueLoop) break;
+        if (config.pollMs > 0) await sleep(config.pollMs);
+        continue;
+      }
       if (config.strategyType === "funding-arb" || config.strategyType === "longer-tf") {
         const handled = await runAlternativeStrategyTick({
           alerter,

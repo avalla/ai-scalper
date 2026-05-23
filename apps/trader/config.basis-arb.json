@@ -1,0 +1,125 @@
+{
+  "tradingProfile": "standard",
+  "strategy": {
+    "type": "basis-arb",
+    "fastWindow": 5,
+    "slowWindow": 20,
+    "thresholdBps": 4,
+    "stopLossBps": 30,
+    "takeProfitBps": 60,
+    "requireLocalMaConfirmation": false
+  },
+  "entry": {
+    "executionMode": "taker",
+    "makerOffsetTicks": 1,
+    "makerPollMs": 200,
+    "makerTimeoutMs": 2000
+  },
+  "wallet": {
+    "autoSize": false,
+    "accountType": "UNIFIED",
+    "coin": "USDT",
+    "fraction": 1,
+    "maxOrderUsdCap": 25
+  },
+  "bybit": {
+    "category": "linear",
+    "symbol": "BTCUSDT",
+    "pollMs": 5000,
+    "orderUsd": 25,
+    "leverage": 1,
+    "slippageTolerancePercent": 0.1,
+    "positionMode": "one-way",
+    "feeRoundTripBps": 11
+  },
+  "basisArb": {
+    "entryThresholdBps": 8,
+    "exitThresholdBps": 2,
+    "maxNotionalUsd": 100,
+    "maxHoldMinutes": 240
+  },
+  "risk": {
+    "maxPositionUsd": 200,
+    "maxDailyLossUsd": 30,
+    "maxSpreadBps": 15,
+    "minTradeIntervalMs": 30000,
+    "maxFundingRateBps": 50
+  },
+  "scanner": {
+    "refreshMs": 60000,
+    "minSetupScore": 45,
+    "minSetupNetEdgeBps": 15,
+    "candidateSymbols": [],
+    "minOpenInterestUsd": 0,
+    "minListingAgeDays": 0
+  },
+  "tickerFailure": {
+    "threshold": 3,
+    "cooldownTicks": 20
+  },
+  "aggressive": {
+    "allowedSymbols": [],
+    "requireScanCandidate": false,
+    "scanCandidatesPath": "apps/trader/data/backtest-candidates.json",
+    "scanLatestPath": "apps/trader/data/scan-latest.json",
+    "scanMaxAgeMinutes": 30,
+    "maxLeverage": 50,
+    "maxFundingRateBps": 8,
+    "maxLossPerTradeUsd": 8,
+    "minEstimatedLiqBufferBps": 80
+  },
+  "exceptional": {
+    "enabled": false,
+    "allowedSymbols": [],
+    "leverage": 100,
+    "maxSpreadBps": 0.5,
+    "maxFundingRateBps": 2,
+    "minHourlyMoveBps": 100,
+    "minMinuteRangeBps": 20,
+    "minNetEdgeBps": 10
+  },
+  "exitPolicy": {
+    "mode": "logical",
+    "safetyDelayMs": 60000,
+    "safetyStopBps": 200
+  },
+  "meta": {
+    "enabled": false,
+    "warmupMinTrades": 5,
+    "pnlWindowSize": 50,
+    "includeAggressiveVariants": false,
+    "halfLifeDays": 0
+  },
+  "runtime": {
+    "artifactFlushTicks": 5,
+    "statePersistenceEnabled": true
+  },
+  "trailingStop": {
+    "enabled": false,
+    "activationBps": 30,
+    "trailBps": 15
+  },
+  "reconcile": {
+    "intervalTicks": 30,
+    "setTradingStopRetryMax": 3,
+    "setTradingStopRetryDelayMs": 500
+  },
+  "drawdown": {
+    "velocityWindowMs": 3600000,
+    "velocityMaxUsd": 30,
+    "maxConsecutiveLosses": 5
+  },
+  "confidenceSizing": {
+    "enabled": false,
+    "minMultiplier": 0.5,
+    "maxMultiplier": 2.0
+  },
+  "alerts": {
+    "webhookUrl": ""
+  },
+  "scanGateAutoTune": {
+    "enabled": false,
+    "percentile": 75,
+    "fallbackBps": 15
+  }
+}

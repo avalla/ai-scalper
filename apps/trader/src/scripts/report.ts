@@ -15,7 +15,7 @@ import {
 // as an optional extension so the report still groups it when added later.
 export type ReportEntry = ClosedPositionLedgerEntry & {
   championIdAtEntry?: string;
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb";
 };
 
 export interface ReportBuckets {

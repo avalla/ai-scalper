@@ -97,8 +97,13 @@ export interface TraderConfig {
   scanExcludedSymbols: string[];
   feeRoundTripBps: number;
   requireLocalMaConfirmation: boolean;
-  // Strategy dispatch (Phase 2+: funding-arb and longer-tf strategies)
-  strategyType: "ma-crossover" | "funding-arb" | "longer-tf";
+  // Strategy dispatch (Phase 2+: funding-arb, longer-tf, basis-arb strategies)
+  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb";
+  // Basis-arbitrage strategy parameters (spot vs perp)
+  basisArbEntryThresholdBps: number;
+  basisArbExitThresholdBps: number;
+  basisArbMaxNotionalUsd: number;
+  basisArbMaxHoldMinutes: number;
   // Funding-rate arbitrage strategy parameters
   fundingArbMinAbsRateBps: number;
   fundingArbEntryWindowMinutesBefore: number;
@@ -303,9 +308,21 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
       const raw = env.STRATEGY_TYPE
         ?? (cfg as { strategy?: { type?: string } }).strategy?.type
         ?? "ma-crossover";
-      if (raw === "funding-arb" || raw === "longer-tf" || raw === "ma-crossover") return raw;
+      if (raw === "funding-arb" || raw === "longer-tf" || raw === "ma-crossover" || raw === "basis-arb") return raw;
       return "ma-crossover";
     })(),
+    basisArbEntryThresholdBps: env.BASIS_ARB_ENTRY_THRESHOLD_BPS
+      ? Number(env.BASIS_ARB_ENTRY_THRESHOLD_BPS)
+      : ((cfg as { basisArb?: { entryThresholdBps?: number } }).basisArb?.entryThresholdBps ?? 8),
+    basisArbExitThresholdBps: env.BASIS_ARB_EXIT_THRESHOLD_BPS
+      ? Number(env.BASIS_ARB_EXIT_THRESHOLD_BPS)
+      : ((cfg as { basisArb?: { exitThresholdBps?: number } }).basisArb?.exitThresholdBps ?? 2),
+    basisArbMaxNotionalUsd: env.BASIS_ARB_MAX_NOTIONAL_USD
+      ? Number(env.BASIS_ARB_MAX_NOTIONAL_USD)
+      : ((cfg as { basisArb?: { maxNotionalUsd?: number } }).basisArb?.maxNotionalUsd ?? 100),
+    basisArbMaxHoldMinutes: env.BASIS_ARB_MAX_HOLD_MINUTES
+      ? Number(env.BASIS_ARB_MAX_HOLD_MINUTES)
+      : ((cfg as { basisArb?: { maxHoldMinutes?: number } }).basisArb?.maxHoldMinutes ?? 240),
     fundingArbMinAbsRateBps: env.FUNDING_ARB_MIN_ABS_RATE_BPS
       ? Number(env.FUNDING_ARB_MIN_ABS_RATE_BPS)
       : ((cfg as { fundingArb?: { minAbsRateBps?: number } }).fundingArb?.minAbsRateBps ?? 5),

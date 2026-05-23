@@ -146,6 +146,10 @@ function makeConfig(): TraderConfig {
     longerTfThresholdBps: 20,
     longerTfStopLossBps: 50,
     longerTfTakeProfitBps: 150,
+    basisArbEntryThresholdBps: 8,
+    basisArbExitThresholdBps: 2,
+    basisArbMaxNotionalUsd: 100,
+    basisArbMaxHoldMinutes: 240,
   };
 }
 
