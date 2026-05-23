@@ -1369,6 +1369,14 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           avgPrice: toNumber(observed.avgPrice),
         } : null,
       });
+      if (reconciled.aligned && haltEntriesUntilCleared) {
+        haltEntriesUntilCleared = false;
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "halt-entries-cleared",
+          symbol: activeSymbol,
+        }));
+      }
       if (!reconciled.aligned) {
         console.log(JSON.stringify({
           ts: new Date().toISOString(),
@@ -1383,7 +1391,9 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         });
 
         if (reconciled.drift === "missing-on-exchange") {
-          // Bybit closed the position (likely native SL/TP) — clear local state.
+          // Bybit closed the position (likely native SL/TP) — clear local state
+          // and lift the halt: state is consistent again.
+          haltEntriesUntilCleared = false;
           state = { ...state, position: null };
           openPositionSymbol = null;
           safetyStopPlaced = false;
@@ -1725,6 +1735,9 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       }
       if (!aggressiveRisk.allowed) {
         return `aggressive-risk:${(aggressiveRisk as { reason: string }).reason}`;
+      }
+      if (haltEntriesUntilCleared) {
+        return "halted-by-position-drift";
       }
       return "entry-attempted";
     };

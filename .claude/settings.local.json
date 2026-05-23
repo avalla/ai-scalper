@@ -5,7 +5,8 @@
       "mcp__lean-ctx__ctx_shell",
       "mcp__lean-ctx__ctx_search",
       "mcp__lean-ctx__ctx_smart_read",
-      "mcp__lean-ctx__ctx_tree"
+      "mcp__lean-ctx__ctx_tree",
+      "mcp__lean-ctx__ctx_edit"
     ]
   }
 }
