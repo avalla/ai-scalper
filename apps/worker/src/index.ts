@@ -382,4 +382,46 @@ async function main(): Promise<void> {
   }
 }
 
+connection.on("error", (error: Error) => {
+  console.error(JSON.stringify({
+    level: "warn",
+    event: "redis-connection-error",
+    error: error.message,
+  }));
+});
+
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(JSON.stringify({ event: "shutdown-start", signal }));
+  try {
+    await worker.close();
+    console.log(JSON.stringify({ event: "shutdown-progress", step: "market-scan-worker-closed" }));
+    await paperSessionWorker.close();
+    console.log(JSON.stringify({ event: "shutdown-progress", step: "paper-session-worker-closed" }));
+    await liveSessionWorker.close();
+    console.log(JSON.stringify({ event: "shutdown-progress", step: "live-session-worker-closed" }));
+    await queue.close();
+    console.log(JSON.stringify({ event: "shutdown-progress", step: "market-scan-queue-closed" }));
+    await paperSessionQueue.close();
+    console.log(JSON.stringify({ event: "shutdown-progress", step: "paper-session-queue-closed" }));
+    await liveSessionQueue.close();
+    console.log(JSON.stringify({ event: "shutdown-progress", step: "live-session-queue-closed" }));
+    await connection.quit();
+    console.log(JSON.stringify({ event: "shutdown-complete" }));
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "warn",
+      event: "shutdown-error",
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  } finally {
+    process.exit(0);
+  }
+}
+
+process.on("SIGINT", () => { void shutdown("SIGINT"); });
+process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
+
 await main();
