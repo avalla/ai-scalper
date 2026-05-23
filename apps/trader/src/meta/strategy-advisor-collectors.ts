@@ -92,10 +92,12 @@ export async function collectRegime(deps: {
     const path = deps.scanLatestPath ?? resolveProjectPath("apps/trader/data/scan-latest.json");
     const raw = await readFile(path, "utf-8");
     const parsed = JSON.parse(raw) as {
+      candidates?: Array<{ symbol: string; score: number; netEdgeBps: number; action: string }>;
       setups?: Array<{ symbol: string; score: number; netEdgeBps: number; action: string }>;
     };
-    if (parsed.setups) {
-      topRankedSetups = parsed.setups.slice(0, 5).map((s) => ({
+    const list = parsed.candidates ?? parsed.setups;
+    if (list) {
+      topRankedSetups = list.slice(0, 5).map((s) => ({
         symbol: s.symbol,
         score: s.score,
         netEdgeBps: s.netEdgeBps,

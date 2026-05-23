@@ -5,7 +5,7 @@ import {
   type PositionInfo,
   type RealtimeOrder,
 } from "@ai-scalper/bybit-client";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   applyConfidenceSizing,
@@ -1698,6 +1698,30 @@ async function collectLlmMarketContext(
   } catch {
     // Swallow — caller falls back to defaults.
   }
+  // Spot-perp basis (BTC).
+  try {
+    const spot = await client.getTicker({ category: "spot", symbol: "BTCUSDT" });
+    const spotLast = Number(spot.lastPrice);
+    if (Number.isFinite(spotLast) && spotLast > 0 && ctx.btcPrice > 0) {
+      ctx.spotPerpBasisBps = ((ctx.btcPrice - spotLast) / spotLast) * 10_000;
+    }
+  } catch { /* ignore */ }
+  // Top ranked setups from scan-latest.json artifact.
+  try {
+    const path = resolveProjectPath("apps/trader/data/scan-latest.json");
+    const raw = await readFile(path, "utf-8");
+    const parsed = JSON.parse(raw) as {
+      candidates?: Array<{ symbol: string; score: number; netEdgeBps: number; action: string }>;
+      setups?: Array<{ symbol: string; score: number; netEdgeBps: number; action: string }>;
+    };
+    const list = parsed.candidates ?? parsed.setups ?? [];
+    ctx.topRankedSetups = list.slice(0, 5).map((s) => ({
+      symbol: s.symbol,
+      score: s.score,
+      netEdgeBps: s.netEdgeBps,
+      action: s.action,
+    }));
+  } catch { /* ignore */ }
   return ctx;
 }
 
