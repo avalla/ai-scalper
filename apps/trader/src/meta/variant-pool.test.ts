@@ -91,7 +91,7 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
   };
 }
 
-const AGG_IDS = ["agg-25x-tight", "agg-50x-tight", "agg-75x-very-tight", "agg-100x-btc-only", "agg-50x-relaxed"];
+const AGG_IDS = ["agg-25x-tight", "agg-50x-tight", "agg-75x-balanced", "agg-100x-btc-only", "agg-50x-relaxed"];
 
 describe("defaultVariantPool", () => {
   test("standard profile with default flag returns the 4 safe variants only", () => {

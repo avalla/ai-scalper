@@ -96,71 +96,73 @@ export function defaultVariantPool(config: TraderConfig): Variant[] {
     return safe;
   }
 
+  // RR tuned to ≥2.5:1 across the board so that even a 30%-win-rate
+  // strategy is EV-positive after 11bps round-trip fees.
   const aggressive: Variant[] = [
     {
       id: "agg-25x-tight",
-      label: "Aggressive 25x, tight stops (5/20 MA, SL 15 / TP 25)",
+      label: "Aggressive 25x (5/20 MA, SL 12 / TP 32, RR 2.7)",
       params: {
         ...sharedRisk,
         leverage: 25,
         fastWindow: 5,
         slowWindow: 20,
         thresholdBps: 4,
-        stopLossBps: 15,
-        takeProfitBps: 25,
+        stopLossBps: 12,
+        takeProfitBps: 32,
       },
     },
     {
       id: "agg-50x-tight",
-      label: "Aggressive 50x, tight stops (5/20 MA, SL 12 / TP 25)",
+      label: "Aggressive 50x (5/20 MA, SL 10 / TP 28, RR 2.8)",
       params: {
         ...sharedRisk,
         leverage: 50,
         fastWindow: 5,
         slowWindow: 20,
         thresholdBps: 4,
-        stopLossBps: 12,
-        takeProfitBps: 25,
+        stopLossBps: 10,
+        takeProfitBps: 28,
       },
     },
     {
-      id: "agg-75x-very-tight",
-      label: "Aggressive 75x, very tight stops (3/15 MA, SL 10 / TP 20)",
+      id: "agg-75x-balanced",
+      label: "Aggressive 75x (3/15 MA, SL 9 / TP 24, RR 2.7)",
       params: {
         ...sharedRisk,
         leverage: 75,
         fastWindow: 3,
         slowWindow: 15,
         thresholdBps: 3,
-        stopLossBps: 10,
-        takeProfitBps: 20,
+        stopLossBps: 9,
+        takeProfitBps: 24,
       },
     },
     {
       id: "agg-100x-btc-only",
-      label: "Aggressive 100x BTC-only (3/12 MA, SL 12 / TP 25)",
+      label: "Aggressive 100x BTC-only (3/12 MA, SL 10 / TP 28, RR 2.8)",
       params: {
         ...sharedRisk,
         leverage: 100,
         fastWindow: 3,
         slowWindow: 12,
         thresholdBps: 3,
-        stopLossBps: 12,
-        takeProfitBps: 25,
+        stopLossBps: 10,
+        takeProfitBps: 28,
       },
       symbolFilter: ["BTCUSDT"],
     },
     {
       id: "agg-50x-relaxed",
-      label: "Aggressive 50x relaxed (4/14 MA, SL 15 / TP 28)",
+      label: "Aggressive 50x relaxed (4/14 MA, SL 14 / TP 38, RR 2.7)",
       params: {
         ...sharedRisk,
         leverage: 50,
         fastWindow: 4,
         slowWindow: 14,
         thresholdBps: 4,
-        stopLossBps: 15,
-        takeProfitBps: 28,
+        stopLossBps: 14,
+        takeProfitBps: 38,
       },
     },
   ];

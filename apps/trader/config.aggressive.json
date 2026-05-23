@@ -11,7 +11,7 @@
     "accountType": "UNIFIED",
     "coin": "USDT",
     "fraction": 1,
-    "maxOrderUsdCap": null
+    "maxOrderUsdCap": 15
   },
   "bybit": {
     "category": "linear",
@@ -35,15 +35,15 @@
     "maxPositionUsd": 1000,
     "maxDailyLossUsd": 100,
     "maxSpreadBps": 5,
-    "minTradeIntervalMs": 5000,
+    "minTradeIntervalMs": 3000,
     "maxFundingRateBps": 12
   },
   "scanner": {
-    "refreshMs": 30000,
+    "refreshMs": 15000,
     "minSetupScore": 55,
     "minSetupNetEdgeBps": 20,
     "candidateSymbols": [],
-    "minOpenInterestUsd": 5000000,
+    "minOpenInterestUsd": 20000000,
     "minListingAgeDays": 30
   },
   "tickerFailure": {
@@ -81,7 +81,7 @@
     "warmupMinTrades": 5,
     "pnlWindowSize": 50,
     "includeAggressiveVariants": true,
-    "halfLifeDays": 7
+    "halfLifeDays": 1
   },
   "runtime": {
     "artifactFlushTicks": 30,

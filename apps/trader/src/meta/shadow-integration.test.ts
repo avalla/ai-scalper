@@ -344,15 +344,15 @@ describe("shadow integration", () => {
       t++;
     }
 
-    // The retuned BTC-only 100x variant has stopLossBps=12 → buffer = 100 - 12 = 88 ≥ 50.
+    // The retuned BTC-only 100x variant has stopLossBps=10 → buffer = 100 - 10 = 90 ≥ 50.
     const extreme = variants.find((v) => v.id === "agg-100x-btc-only")!;
     expect(extreme.params.leverage).toBe(100);
-    expect(extreme.params.stopLossBps).toBe(12);
+    expect(extreme.params.stopLossBps).toBe(10);
     const liqDistance = 10_000 / extreme.params.leverage;
     expect(liqDistance - extreme.params.stopLossBps).toBeGreaterThanOrEqual(50);
 
     // At least 2 aggressive variants closed ≥1 trade each.
-    const aggIds = ["agg-25x-tight", "agg-50x-tight", "agg-75x-very-tight", "agg-100x-btc-only", "agg-50x-relaxed"];
+    const aggIds = ["agg-25x-tight", "agg-50x-tight", "agg-75x-balanced", "agg-100x-btc-only", "agg-50x-relaxed"];
     const aggressiveTraded = aggIds.filter((id) => (allocator.stats[id]?.closedTrades ?? 0) >= 1);
     expect(aggressiveTraded.length).toBeGreaterThanOrEqual(2);
 
