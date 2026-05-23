@@ -171,10 +171,11 @@ async function runTraderSession(params: {
       if (forwardTraderStdout) {
         console.log(`[trader] ${line}`);
       }
-      await logJob(params.job, `stdout ${line}`);
+      // Only forward to the job log if the trader event is material.
+      // Quiet observational ticks, candidate-verdicts, variant filters etc. are dropped.
       const summary = summarizeTraderStdout(line);
       if (summary) {
-        await logJob(params.job, `state ${summary}`);
+        await logJob(params.job, summary);
       }
     },
   });

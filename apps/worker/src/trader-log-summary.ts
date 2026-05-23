@@ -43,11 +43,60 @@ function readTopRankedSetups(parsed: Record<string, unknown>): string | null {
   return compact.length > 0 ? compact.join(",") : null;
 }
 
+/**
+ * Events that always get a job-log line (operationally important).
+ * Tick events are forwarded ONLY when they include execution or position change;
+ * tick-quiet, candidate-verdict, variant-filtered, etc. are dropped.
+ */
+const ALWAYS_LOG_EVENTS = new Set([
+  "position-drift-detected",
+  "halt-entries-cleared",
+  "drawdown-halt",
+  "shutdown-signal",
+  "shutdown-with-open-position",
+  "set-trading-stop-failed-after-retries",
+  "exchange-native-stop-failed",
+  "trailing-stop-updated",
+  "setup-gate-auto-tuned",
+  "session-start",
+  "budget-check",
+  "job-failed",
+]);
+
 export function summarizeTraderStdout(line: string): string | null {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(line) as Record<string, unknown>;
   } catch {
+    return null;
+  }
+
+  const event = readString(parsed, "event");
+
+  // Always-log events: compact one-line summary of the event payload.
+  if (event && ALWAYS_LOG_EVENTS.has(event)) {
+    const fields: string[] = [`event=${event}`];
+    for (const [k, v] of Object.entries(parsed)) {
+      if (k === "event" || k === "ts") continue;
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+        fields.push(`${k}=${v}`);
+      }
+    }
+    return fields.join(" ");
+  }
+
+  // For tick/tick-quiet (or legacy lines with no "event" field): only forward
+  // when something material happened.
+  if (event === "tick" || event === "tick-quiet" || event === null) {
+    const lastExecution = parsed.lastExecution && typeof parsed.lastExecution === "object"
+      ? parsed.lastExecution as Record<string, unknown>
+      : null;
+    const hasPosition = parsed.position && typeof parsed.position === "object";
+    if (!lastExecution && !hasPosition) {
+      return null; // quiet observational tick — drop from job log
+    }
+  } else {
+    // Other events (candidate-verdict, champion-*, variant-filtered, etc.): drop.
     return null;
   }
 

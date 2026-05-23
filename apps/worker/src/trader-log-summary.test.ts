@@ -2,26 +2,35 @@ import { describe, expect, test } from "bun:test";
 import { summarizeTraderStdout } from "./trader-log-summary";
 
 describe("summarizeTraderStdout", () => {
-  test("renders a no-entry summary for flat signals", () => {
+  test("drops a flat no-entry tick (no execution, no position)", () => {
     const summary = summarizeTraderStdout(JSON.stringify({
+      event: "tick",
       action: "flat",
       aggressiveRisk: "allowed",
       intent: "no-entry",
       intentReason: "signal-flat",
       mode: "live",
       position: null,
-      rankedSetupsTop: [
-        { action: "flat", score: 51.2, symbol: "RIVERUSDT" },
-        { action: "long", score: 48.7, symbol: "EDGEUSDT" },
-      ],
       risk: "signal-flat",
       symbol: "RIVERUSDT",
       ticks: 6,
     }));
 
-    expect(summary).toBe(
-      "mode=live pair=RIVERUSDT signal=flat ticks=6 top=RIVERUSDT:flat@51.2,EDGEUSDT:long@48.7 intent=no-entry reason=signal-flat risk=signal-flat position=flat",
-    );
+    expect(summary).toBeNull();
+  });
+
+  test("compacts always-log events like position-drift-detected", () => {
+    const summary = summarizeTraderStdout(JSON.stringify({
+      ts: "2026-01-01T00:00:00Z",
+      event: "position-drift-detected",
+      symbol: "BTCUSDT",
+      drift: "missing-on-exchange",
+      details: null,
+    }));
+
+    expect(summary).toContain("event=position-drift-detected");
+    expect(summary).toContain("symbol=BTCUSDT");
+    expect(summary).toContain("drift=missing-on-exchange");
   });
 
   test("renders an open-long summary with execution details", () => {
