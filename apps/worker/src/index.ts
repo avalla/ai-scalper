@@ -164,9 +164,13 @@ async function runTraderSession(params: {
   });
   await logJob(params.job, `subprocess-started pid=${subprocess.pid ?? "unknown"}`);
 
+  const forwardTraderStdout = (process.env.FORWARD_TRADER_STDOUT ?? "true") !== "false";
   const stdoutPromise = collectStream({
     stream: subprocess.stdout,
     onLine: async (line) => {
+      if (forwardTraderStdout) {
+        console.log(`[trader] ${line}`);
+      }
       await logJob(params.job, `stdout ${line}`);
       const summary = summarizeTraderStdout(line);
       if (summary) {
@@ -177,6 +181,9 @@ async function runTraderSession(params: {
   const stderrPromise = collectStream({
     stream: subprocess.stderr,
     onLine: async (line) => {
+      if (forwardTraderStdout) {
+        console.error(`[trader] ${line}`);
+      }
       await logJob(params.job, `stderr ${line}`);
     },
   });
