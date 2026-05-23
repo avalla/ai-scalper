@@ -51,6 +51,10 @@ export interface LlmManagedPosition {
   maeUsd: number;
   decisionsHistory: Array<{ at: number; action: string; reasoning: string }>;
   hedge: LlmManagedHedge | null;
+  /** Bybit qty lot step for the symbol (e.g. "0.1"). Used to normalize close/partial qtys. */
+  qtyStep?: string;
+  /** Bybit minimum order qty for the symbol. */
+  minOrderQty?: string;
 }
 
 export interface LlmManagedMarketContext {

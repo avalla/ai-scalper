@@ -1766,7 +1766,26 @@ async function executeLlmManagedAction(args: {
 
   // ── Full or partial close on the primary leg ───────────────────────────
   if (isFullClose || partialFraction !== null) {
-    const closeQty = partialFraction !== null ? pos.qty * partialFraction : pos.qty;
+    const rawCloseQty = partialFraction !== null ? pos.qty * partialFraction : pos.qty;
+    // Normalize to lot step. For full close, floor to step but cap at pos.qty.
+    let closeQty = rawCloseQty;
+    let closeQtyStr = closeQty.toString();
+    if (pos.qtyStep) {
+      const step = Number(pos.qtyStep);
+      const decimals = pos.qtyStep.split(".")[1]?.length ?? 0;
+      if (Number.isFinite(step) && step > 0) {
+        closeQty = Math.floor(rawCloseQty / step) * step;
+        closeQtyStr = closeQty.toFixed(decimals);
+      }
+    }
+    if (pos.minOrderQty && closeQty < Number(pos.minOrderQty)) {
+      console.log(JSON.stringify({
+        ts: observedAt, event: "llm-managed-close-skipped",
+        symbol: pos.symbol, action: decision.action,
+        reason: "close-qty-below-min", closeQty, minOrderQty: pos.minOrderQty,
+      }));
+      return;
+    }
     const closeSide: "Buy" | "Sell" = pos.side === "long" ? "Sell" : "Buy";
     const closeNotional = closeQty * currentPrice;
 
@@ -1776,7 +1795,7 @@ async function executeLlmManagedAction(args: {
           category: "linear",
           symbol: pos.symbol,
           side: closeSide,
-          qty: closeQty.toString(),
+          qty: closeQtyStr,
           orderType: "Market",
           reduceOnly: true,
         });
@@ -2222,7 +2241,45 @@ async function runLlmManagedTick(params: {
       return { shouldContinueLoop: true };
     }
     if (!Number.isFinite(entryPrice) || entryPrice <= 0) return { shouldContinueLoop: true };
-    const qty = clampedNotional / entryPrice;
+
+    // Fetch instrument info to normalize qty against Bybit's qtyStep + minOrderQty.
+    // Position size (notional × leverage) determines exposure; qty in contracts is
+    // computed from total exposure / price, then floored to the lot step.
+    let instrumentInfo;
+    try {
+      instrumentInfo = await client.getInstrumentInfo({ category: "linear", symbol });
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-open-rejected",
+        reason: "instrument-info-unavailable",
+        symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      return { shouldContinueLoop: true };
+    }
+    const totalExposureUsd = clampedNotional * clampedLeverage;
+    let qtyStr: string;
+    try {
+      qtyStr = toOrderQty({
+        instrument: instrumentInfo,
+        notionalUsd: totalExposureUsd,
+        price: entryPrice,
+      });
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-open-rejected",
+        reason: "qty-normalization-failed",
+        symbol,
+        totalExposureUsd,
+        entryPrice,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      await alerter.send(`llm-managed open rejected: qty-normalization-failed (${symbol})`).catch(() => {});
+      return { shouldContinueLoop: true };
+    }
+    const qty = Number(qtyStr);
 
     // Set leverage (live only).
     if (!config.paperTrading) {
@@ -2247,7 +2304,7 @@ async function runLlmManagedTick(params: {
           category: "linear",
           symbol,
           side: decision.side === "long" ? "Buy" : "Sell",
-          qty: qty.toString(),
+          qty: qtyStr,
           orderType: "Market",
         });
       } catch (err) {
@@ -2255,6 +2312,7 @@ async function runLlmManagedTick(params: {
           ts: observedAt,
           event: "llm-managed-open-order-failed",
           symbol,
+          qty: qtyStr,
           error: err instanceof Error ? err.message : String(err),
         }));
         await alerter.send(`llm-managed open order failed: ${symbol}`).catch(() => {});
@@ -2277,6 +2335,8 @@ async function runLlmManagedTick(params: {
       maeUsd: 0,
       decisionsHistory: [],
       hedge: null,
+      qtyStep: instrumentInfo.lotSizeFilter.qtyStep,
+      minOrderQty: instrumentInfo.lotSizeFilter.minOrderQty,
     };
     positionRef.set(newPos);
     openPositionSymbolRef.set(symbol);
