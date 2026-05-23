@@ -70,5 +70,15 @@
     "mode": "logical",
     "safetyDelayMs": 5000,
     "safetyStopBps": 60
+  },
+  "meta": {
+    "enabled": false,
+    "warmupMinTrades": 5,
+    "pnlWindowSize": 50,
+    "includeAggressiveVariants": false
+  },
+  "runtime": {
+    "artifactFlushTicks": 30,
+    "statePersistenceEnabled": false
   }
 }

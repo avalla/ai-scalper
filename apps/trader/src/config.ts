@@ -67,6 +67,26 @@ export interface TraderConfig {
   exitPolicyMode: "exchange-native" | "logical";
   exitPolicySafetyDelayMs: number;
   exitPolicySafetyStopBps: number;
+  metaEnabled: boolean;
+  metaWarmupMinTrades: number;
+  metaPnlWindowSize: number;
+  metaIncludeAggressiveVariants: boolean;
+  runtimeArtifactFlushTicks: number;
+  statePersistenceEnabled: boolean;
+}
+
+function resolveIncludeAggressiveVariants(
+  env: NodeJS.ProcessEnv,
+  cfgValue: boolean | undefined,
+  tradingProfile: TraderConfig["tradingProfile"],
+): boolean {
+  if (env.META_INCLUDE_AGGRESSIVE_VARIANTS !== undefined) {
+    return env.META_INCLUDE_AGGRESSIVE_VARIANTS === "true";
+  }
+  if (cfgValue !== undefined) {
+    return cfgValue;
+  }
+  return tradingProfile === "aggressive-perps";
 }
 
 export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderConfig {
@@ -145,5 +165,25 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     exitPolicyMode: cfg.exitPolicy.mode as "exchange-native" | "logical",
     exitPolicySafetyDelayMs: cfg.exitPolicy.safetyDelayMs,
     exitPolicySafetyStopBps: cfg.exitPolicy.safetyStopBps,
+    metaEnabled: env.META_ENABLED ? env.META_ENABLED === "true" : ((cfg as { meta?: { enabled?: boolean } }).meta?.enabled ?? false),
+    metaWarmupMinTrades: env.META_WARMUP_MIN_TRADES
+      ? Number(env.META_WARMUP_MIN_TRADES)
+      : ((cfg as { meta?: { warmupMinTrades?: number } }).meta?.warmupMinTrades ?? 5),
+    metaPnlWindowSize: env.META_PNL_WINDOW_SIZE
+      ? Number(env.META_PNL_WINDOW_SIZE)
+      : ((cfg as { meta?: { pnlWindowSize?: number } }).meta?.pnlWindowSize ?? 50),
+    metaIncludeAggressiveVariants: resolveIncludeAggressiveVariants(
+      env,
+      (cfg as { meta?: { includeAggressiveVariants?: boolean } }).meta?.includeAggressiveVariants,
+      (env.TRADING_PROFILE === "aggressive-perps" || env.TRADING_PROFILE === "standard"
+        ? env.TRADING_PROFILE
+        : cfg.tradingProfile as TraderConfig["tradingProfile"]),
+    ),
+    runtimeArtifactFlushTicks: env.RUNTIME_ARTIFACT_FLUSH_TICKS
+      ? Number(env.RUNTIME_ARTIFACT_FLUSH_TICKS)
+      : ((cfg as { runtime?: { artifactFlushTicks?: number } }).runtime?.artifactFlushTicks ?? 30),
+    statePersistenceEnabled: env.STATE_PERSISTENCE_ENABLED
+      ? env.STATE_PERSISTENCE_ENABLED === "true"
+      : ((cfg as { runtime?: { statePersistenceEnabled?: boolean } }).runtime?.statePersistenceEnabled ?? false),
   };
 }

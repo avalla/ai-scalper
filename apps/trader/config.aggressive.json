@@ -46,9 +46,9 @@
     "cooldownTicks": 10
   },
   "aggressive": {
-    "allowedSymbols": [],
+    "allowedSymbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     "requireScanCandidate": true,
-    "scanCandidatesPath": "apps/trader/data/backtest-candidates.json",
+    "scanCandidatesPath": "apps/trader/data/scan-latest.json",
     "scanLatestPath": "apps/trader/data/scan-latest.json",
     "scanMaxAgeMinutes": 15,
     "maxLeverage": 25,
@@ -70,5 +70,15 @@
     "mode": "logical",
     "safetyDelayMs": 5000,
     "safetyStopBps": 60
+  },
+  "meta": {
+    "enabled": false,
+    "warmupMinTrades": 5,
+    "pnlWindowSize": 50,
+    "includeAggressiveVariants": true
+  },
+  "runtime": {
+    "artifactFlushTicks": 30,
+    "statePersistenceEnabled": false
   }
 }
