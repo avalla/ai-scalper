@@ -97,8 +97,20 @@ export interface TraderConfig {
   scanExcludedSymbols: string[];
   feeRoundTripBps: number;
   requireLocalMaConfirmation: boolean;
-  // Strategy dispatch (Phase 2+: funding-arb, longer-tf, basis-arb, pairs-trading, bollinger-adx, calendar-spread)
-  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread";
+  // Strategy dispatch (Phase 2+: funding-arb, longer-tf, basis-arb, pairs-trading, bollinger-adx, calendar-spread, llm-managed)
+  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread" | "llm-managed";
+  // LLM-managed strategy (fully autonomous Claude-driven entry + management)
+  llmManagedAllowedSymbols: string[];
+  llmManagedOpenReviewIntervalSec: number;
+  llmManagedManageReviewIntervalSec: number;
+  llmManagedMaxNotionalUsd: number;
+  llmManagedMaxLeverage: number;
+  llmManagedMaxHoldHours: number;
+  llmManagedMaxAbsoluteLossUsd: number;
+  llmManagedHedgeMaxNotionalUsd: number;
+  llmManagedModel: string;
+  llmManagedTimeoutMs: number;
+  llmManagedPostCutLossCooldownMs: number;
   // Calendar-spread strategy parameters (perp vs dated quarterly futures)
   calendarPerpSymbol: string;
   calendarDatedSymbol: string;
@@ -356,9 +368,43 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
         || raw === "pairs-trading"
         || raw === "bollinger-adx"
         || raw === "calendar-spread"
+        || raw === "llm-managed"
       ) return raw;
       return "ma-crossover";
     })(),
+    llmManagedAllowedSymbols: env.LLM_MANAGED_ALLOWED_SYMBOLS
+      ? env.LLM_MANAGED_ALLOWED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
+      : ((cfg as { llmManaged?: { allowedSymbols?: string[] } }).llmManaged?.allowedSymbols
+        ?? ["BTCUSDT", "ETHUSDT", "SOLUSDT"]),
+    llmManagedOpenReviewIntervalSec: env.LLM_MANAGED_OPEN_REVIEW_INTERVAL_SEC
+      ? Number(env.LLM_MANAGED_OPEN_REVIEW_INTERVAL_SEC)
+      : ((cfg as { llmManaged?: { openReviewIntervalSec?: number } }).llmManaged?.openReviewIntervalSec ?? 600),
+    llmManagedManageReviewIntervalSec: env.LLM_MANAGED_MANAGE_REVIEW_INTERVAL_SEC
+      ? Number(env.LLM_MANAGED_MANAGE_REVIEW_INTERVAL_SEC)
+      : ((cfg as { llmManaged?: { manageReviewIntervalSec?: number } }).llmManaged?.manageReviewIntervalSec ?? 180),
+    llmManagedMaxNotionalUsd: env.LLM_MANAGED_MAX_NOTIONAL_USD
+      ? Number(env.LLM_MANAGED_MAX_NOTIONAL_USD)
+      : ((cfg as { llmManaged?: { maxNotionalUsd?: number } }).llmManaged?.maxNotionalUsd ?? 100),
+    llmManagedMaxLeverage: env.LLM_MANAGED_MAX_LEVERAGE
+      ? Number(env.LLM_MANAGED_MAX_LEVERAGE)
+      : ((cfg as { llmManaged?: { maxLeverage?: number } }).llmManaged?.maxLeverage ?? 10),
+    llmManagedMaxHoldHours: env.LLM_MANAGED_MAX_HOLD_HOURS
+      ? Number(env.LLM_MANAGED_MAX_HOLD_HOURS)
+      : ((cfg as { llmManaged?: { maxHoldHours?: number } }).llmManaged?.maxHoldHours ?? 24),
+    llmManagedMaxAbsoluteLossUsd: env.LLM_MANAGED_MAX_ABSOLUTE_LOSS_USD
+      ? Number(env.LLM_MANAGED_MAX_ABSOLUTE_LOSS_USD)
+      : ((cfg as { llmManaged?: { maxAbsoluteLossUsd?: number } }).llmManaged?.maxAbsoluteLossUsd ?? 20),
+    llmManagedHedgeMaxNotionalUsd: env.LLM_MANAGED_HEDGE_MAX_NOTIONAL_USD
+      ? Number(env.LLM_MANAGED_HEDGE_MAX_NOTIONAL_USD)
+      : ((cfg as { llmManaged?: { hedgeMaxNotionalUsd?: number } }).llmManaged?.hedgeMaxNotionalUsd ?? 100),
+    llmManagedModel: env.LLM_MANAGED_MODEL
+      ?? ((cfg as { llmManaged?: { model?: string } }).llmManaged?.model ?? "claude-haiku-4-5-20251001"),
+    llmManagedTimeoutMs: env.LLM_MANAGED_TIMEOUT_MS
+      ? Number(env.LLM_MANAGED_TIMEOUT_MS)
+      : ((cfg as { llmManaged?: { timeoutMs?: number } }).llmManaged?.timeoutMs ?? 15000),
+    llmManagedPostCutLossCooldownMs: env.LLM_MANAGED_POST_CUT_LOSS_COOLDOWN_MS
+      ? Number(env.LLM_MANAGED_POST_CUT_LOSS_COOLDOWN_MS)
+      : ((cfg as { llmManaged?: { postCutLossCooldownMs?: number } }).llmManaged?.postCutLossCooldownMs ?? 1800000),
     calendarPerpSymbol: env.CALENDAR_PERP_SYMBOL
       ?? ((cfg as { calendarSpread?: { perpSymbol?: string } }).calendarSpread?.perpSymbol ?? "BTCUSDT"),
     calendarDatedSymbol: env.CALENDAR_DATED_SYMBOL

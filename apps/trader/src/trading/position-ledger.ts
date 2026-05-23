@@ -38,7 +38,11 @@ export interface ClosedPositionLedgerEntry {
   /** Bandit champion variant that was active at entry — for per-variant attribution. */
   championIdAtEntry?: string | null;
   /** Strategy that produced this trade. Optional for backward-compat with old ledger entries. */
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread" | "llm-managed";
+  /** LLM-managed: which action was the close attributed to (tp-full, cut-loss, scale-out, safety-hard-sl, ...). */
+  llmManagedAction?: string;
+  /** LLM-managed: reasoning string from the LLM (or safety system) for this close. */
+  llmManagedReasoning?: string;
   /** Basis (bps) at entry — present for basis-arb trades, undefined otherwise. */
   basisEntryBps?: number;
   /** Basis (bps) at exit — present for basis-arb trades, undefined otherwise. */

@@ -81,6 +81,17 @@ import {
   type BollingerAdxPosition,
 } from "../strategies/bollinger-adx";
 import {
+  checkSafetyOverride as llmManagedCheckSafetyOverride,
+  computePnlBps as llmManagedComputePnlBps,
+  computePnlUsd as llmManagedComputePnlUsd,
+  getManageDecision as llmManagedGetManageDecision,
+  getOpenDecision as llmManagedGetOpenDecision,
+  updateExcursions as llmManagedUpdateExcursions,
+  type LlmManagedMarketContext,
+  type LlmManagedPosition,
+  type ManageDecision as LlmManageDecision,
+} from "../strategies/llm-managed";
+import {
   getOrderApproval,
   type OrderSupervisorContext,
   type SupervisedStrategy,
@@ -747,7 +758,7 @@ function buildClosedPositionLedgerEntry(params: {
   symbol: string;
   feeRoundTripBps: number;
   championIdAtEntry?: string | null;
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread" | "llm-managed";
   basisEntryBps?: number;
   basisExitBps?: number;
   pairsLeg2Symbol?: string;
@@ -1648,6 +1659,720 @@ async function runBasisArbTick(params: {
     netPnl,
   }));
 
+  return { shouldContinueLoop: true };
+}
+
+/**
+ * Build a snapshot of market context for the LLM-managed strategy. Cheap
+ * approximation (single BTC ticker + funding) — kept lightweight to fit the
+ * per-tick budget. Errors surface as a default `LlmManagedMarketContext`
+ * with zeroed fields and an observedAt timestamp.
+ */
+async function collectLlmMarketContext(
+  client: ReturnType<typeof createBybitClient>,
+  observedAt: string,
+): Promise<LlmManagedMarketContext> {
+  const ctx: LlmManagedMarketContext = {
+    observedAt,
+    btcPrice: 0,
+    btcTrendBps4h: 0,
+    btcRealizedVol1h: 0,
+    avgFundingRateBps: 0,
+    spotPerpBasisBps: 0,
+    topRankedSetups: [],
+  };
+  try {
+    const t = await client.getTicker({ category: "linear", symbol: "BTCUSDT" });
+    const last = Number(t.lastPrice);
+    const prev1h = Number(t.prevPrice1h);
+    const prev24h = Number(t.prevPrice24h);
+    if (Number.isFinite(last) && last > 0) ctx.btcPrice = last;
+    if (Number.isFinite(prev24h) && prev24h > 0) {
+      ctx.btcTrendBps4h = ((last - prev24h) / prev24h) * 10_000 / 6; // approx 4h slice of 24h
+    }
+    if (Number.isFinite(prev1h) && prev1h > 0) {
+      ctx.btcRealizedVol1h = Math.abs((last - prev1h) / prev1h) * 100;
+    }
+    const fr = Number(t.fundingRate);
+    if (Number.isFinite(fr)) ctx.avgFundingRateBps = fr * 10_000;
+  } catch {
+    // Swallow — caller falls back to defaults.
+  }
+  return ctx;
+}
+
+/**
+ * Execute a single management action against the current llm-managed position.
+ * Mutates the supplied refs in place. Persists a ledger entry on every close
+ * (full or partial). Caller MUST have already pushed the decision into
+ * `position.decisionsHistory` if applicable.
+ */
+async function executeLlmManagedAction(args: {
+  alerter: WebhookAlerter;
+  client: ReturnType<typeof createBybitClient>;
+  config: TraderConfig;
+  decision: LlmManageDecision;
+  observedAt: string;
+  positionRef: MutableRef<LlmManagedPosition | null>;
+  openPositionSymbolRef: MutableRef<string | null>;
+  stateRef: MutableRef<TraderState>;
+  currentPrice: number;
+  positionLedger: ReturnType<typeof createPositionLedger>;
+  toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
+  setLastCutLossAt: (at: number) => void;
+}): Promise<void> {
+  const {
+    alerter, client, config, decision, observedAt, positionRef,
+    openPositionSymbolRef, stateRef, currentPrice, positionLedger,
+    toPersistedTraderSnapshot, setLastCutLossAt,
+  } = args;
+  const pos = positionRef.get();
+  if (!pos) return;
+
+  const isFullClose = decision.action === "tp-full" || decision.action === "cut-loss";
+  const partialFraction =
+    decision.action === "tp-partial" || decision.action === "scale-out"
+      ? Math.max(0.1, Math.min(0.9, decision.params?.tpPartialFraction ?? 0.5))
+      : null;
+
+  // ── HOLD ────────────────────────────────────────────────────────────────
+  if (decision.action === "hold") {
+    return;
+  }
+
+  // ── Full or partial close on the primary leg ───────────────────────────
+  if (isFullClose || partialFraction !== null) {
+    const closeQty = partialFraction !== null ? pos.qty * partialFraction : pos.qty;
+    const closeSide: "Buy" | "Sell" = pos.side === "long" ? "Sell" : "Buy";
+    const closeNotional = closeQty * currentPrice;
+
+    if (!config.paperTrading) {
+      try {
+        await client.createOrder({
+          category: "linear",
+          symbol: pos.symbol,
+          side: closeSide,
+          qty: closeQty.toString(),
+          orderType: "Market",
+          reduceOnly: true,
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          ts: observedAt,
+          event: "llm-managed-close-failed",
+          symbol: pos.symbol,
+          action: decision.action,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        await alerter.send(
+          `llm-managed close failed: symbol=${pos.symbol} action=${decision.action}`,
+        ).catch(() => {});
+        return;
+      }
+    }
+
+    // Realize PnL on the closed slice.
+    const sliceSign = pos.side === "long" ? 1 : -1;
+    const grossPnl = sliceSign * (currentPrice - pos.entryPrice) * closeQty;
+    const feePerLeg = closeNotional * (config.feeRoundTripBps / 10_000) / 2;
+    const netPnl = grossPnl - 2 * feePerLeg;
+
+    const previousState = stateRef.get();
+    const nextState: TraderState = {
+      ...previousState,
+      realizedPnlUsd: previousState.realizedPnlUsd + netPnl,
+      lastTradeAt: Date.now(),
+      position: null,
+    };
+    stateRef.set(nextState);
+
+    if (isFullClose) {
+      positionRef.set(null);
+      openPositionSymbolRef.set(null);
+      if (decision.action === "cut-loss") {
+        setLastCutLossAt(Date.now());
+      }
+    } else {
+      // Partial: shrink qty + notional pro-rata.
+      const remainingQty = pos.qty - closeQty;
+      const remainingNotional = pos.notionalUsd * (remainingQty / pos.qty);
+      positionRef.set({
+        ...pos,
+        qty: remainingQty,
+        notionalUsd: remainingNotional,
+      });
+    }
+
+    const ledgerEntry: ClosedPositionLedgerEntry = {
+      closedAt: new Date().toISOString(),
+      cumulativeRealizedPnlUsd: nextState.realizedPnlUsd,
+      entryPrice: pos.entryPrice,
+      exitPrice: currentPrice,
+      exitReason: decision.reasoning,
+      leverage: pos.leverage,
+      notionalUsd: closeNotional,
+      openedAt: new Date(pos.openedAt).toISOString(),
+      quantity: closeQty,
+      realizedPnlUsd: netPnl,
+      grossPnlUsd: grossPnl,
+      feeUsd: 2 * feePerLeg,
+      championIdAtEntry: null,
+      strategyType: "llm-managed",
+      llmManagedAction: decision.action,
+      llmManagedReasoning: decision.reasoning,
+      side: pos.side,
+      stopLossPrice: 0,
+      symbol: pos.symbol,
+      takeProfitPrice: 0,
+    };
+    await positionLedger.appendClosedPosition(ledgerEntry);
+    await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
+      openPositionSymbol: positionRef.get() ? pos.symbol : null,
+      state: nextState,
+    }));
+
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "llm-managed-close",
+      action: decision.action,
+      symbol: pos.symbol,
+      closeQty,
+      currentPrice,
+      grossPnl,
+      feeUsd: 2 * feePerLeg,
+      netPnl,
+      reasoning: decision.reasoning,
+    }));
+    return;
+  }
+
+  // ── open-hedge ─────────────────────────────────────────────────────────
+  if (decision.action === "open-hedge") {
+    if (pos.hedge !== null) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-hedge-rejected",
+        reason: "hedge-already-open",
+      }));
+      return;
+    }
+    const hedgeSymbol = decision.params?.hedgeSymbol ?? pos.symbol;
+    if (!config.llmManagedAllowedSymbols.includes(hedgeSymbol)) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-hedge-rejected",
+        reason: "hedge-symbol-not-allowed",
+        hedgeSymbol,
+      }));
+      return;
+    }
+    const hedgeNotional = Math.min(pos.notionalUsd, config.llmManagedHedgeMaxNotionalUsd);
+    const hedgeSide: "long" | "short" = pos.side === "long" ? "short" : "long";
+    // Use current price as hedge entry approximation; if the symbol differs we'd
+    // need its own ticker — fetch best-effort.
+    let hedgePrice = currentPrice;
+    if (hedgeSymbol !== pos.symbol) {
+      try {
+        const t = await client.getTicker({ category: "linear", symbol: hedgeSymbol });
+        const p = Number(t.lastPrice);
+        if (Number.isFinite(p) && p > 0) hedgePrice = p;
+      } catch {
+        console.log(JSON.stringify({
+          ts: observedAt,
+          event: "llm-managed-hedge-price-fallback",
+          hedgeSymbol,
+        }));
+      }
+    }
+    const hedgeQty = hedgePrice > 0 ? hedgeNotional / hedgePrice : 0;
+    if (hedgeQty <= 0) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-hedge-rejected",
+        reason: "invalid-hedge-qty",
+        hedgePrice, hedgeNotional,
+      }));
+      return;
+    }
+
+    if (!config.paperTrading) {
+      try {
+        await client.createOrder({
+          category: "linear",
+          symbol: hedgeSymbol,
+          side: hedgeSide === "long" ? "Buy" : "Sell",
+          qty: hedgeQty.toString(),
+          orderType: "Market",
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          ts: observedAt,
+          event: "llm-managed-hedge-open-failed",
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        await alerter.send(`llm-managed hedge open failed: ${hedgeSymbol}`).catch(() => {});
+        return;
+      }
+    }
+
+    positionRef.set({
+      ...pos,
+      hedge: {
+        symbol: hedgeSymbol,
+        side: hedgeSide,
+        entryPrice: hedgePrice,
+        qty: hedgeQty,
+        notionalUsd: hedgeNotional,
+        openedAt: Date.now(),
+      },
+    });
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "llm-managed-hedge-opened",
+      hedgeSymbol, hedgeSide, hedgeQty, hedgePrice, hedgeNotional,
+    }));
+    return;
+  }
+
+  // ── close-hedge ────────────────────────────────────────────────────────
+  if (decision.action === "close-hedge") {
+    const hedge = pos.hedge;
+    if (!hedge) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-close-hedge-noop",
+        reason: "no-active-hedge",
+      }));
+      return;
+    }
+    // Fetch current hedge price.
+    let hedgeCurrentPrice = hedge.entryPrice;
+    try {
+      const t = await client.getTicker({ category: "linear", symbol: hedge.symbol });
+      const p = Number(t.lastPrice);
+      if (Number.isFinite(p) && p > 0) hedgeCurrentPrice = p;
+    } catch {
+      // Use entry price as fallback.
+    }
+    if (!config.paperTrading) {
+      try {
+        await client.createOrder({
+          category: "linear",
+          symbol: hedge.symbol,
+          side: hedge.side === "long" ? "Sell" : "Buy",
+          qty: hedge.qty.toString(),
+          orderType: "Market",
+          reduceOnly: true,
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          ts: observedAt,
+          event: "llm-managed-hedge-close-failed",
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        await alerter.send(`llm-managed hedge close failed: ${hedge.symbol}`).catch(() => {});
+        return;
+      }
+    }
+    const hSign = hedge.side === "long" ? 1 : -1;
+    const hedgePnl = hSign * (hedgeCurrentPrice - hedge.entryPrice) * hedge.qty;
+    const hedgeFee = hedge.notionalUsd * (config.feeRoundTripBps / 10_000);
+    const hedgeNet = hedgePnl - hedgeFee;
+    const previousState = stateRef.get();
+    const nextState: TraderState = {
+      ...previousState,
+      realizedPnlUsd: previousState.realizedPnlUsd + hedgeNet,
+      lastTradeAt: Date.now(),
+    };
+    stateRef.set(nextState);
+    positionRef.set({ ...pos, hedge: null });
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "llm-managed-hedge-closed",
+      hedgeSymbol: hedge.symbol,
+      hedgePnl,
+      hedgeFee,
+      hedgeNet,
+    }));
+    return;
+  }
+
+  // ── scale-in ───────────────────────────────────────────────────────────
+  if (decision.action === "scale-in") {
+    const addNotional = decision.params?.scaleNotionalUsd ?? 0;
+    if (addNotional <= 0) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-scale-in-rejected",
+        reason: "non-positive-notional",
+      }));
+      return;
+    }
+    const cap = config.llmManagedMaxNotionalUsd * 2;
+    const totalAfter = pos.notionalUsd + addNotional;
+    if (totalAfter > cap) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-scale-in-rejected",
+        reason: "notional-cap",
+        totalAfter, cap,
+      }));
+      return;
+    }
+    const addQty = currentPrice > 0 ? addNotional / currentPrice : 0;
+    if (addQty <= 0) return;
+    if (!config.paperTrading) {
+      try {
+        await client.createOrder({
+          category: "linear",
+          symbol: pos.symbol,
+          side: pos.side === "long" ? "Buy" : "Sell",
+          qty: addQty.toString(),
+          orderType: "Market",
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          ts: observedAt,
+          event: "llm-managed-scale-in-failed",
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        await alerter.send(`llm-managed scale-in failed: ${pos.symbol}`).catch(() => {});
+        return;
+      }
+    }
+    // New weighted-average entry price.
+    const totalQty = pos.qty + addQty;
+    const newEntryPrice = ((pos.entryPrice * pos.qty) + (currentPrice * addQty)) / totalQty;
+    positionRef.set({
+      ...pos,
+      qty: totalQty,
+      notionalUsd: totalAfter,
+      entryPrice: newEntryPrice,
+    });
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "llm-managed-scale-in",
+      addNotional, addQty, newEntryPrice, totalQty, totalAfter,
+    }));
+    return;
+  }
+}
+
+/**
+ * llm-managed tick: fully autonomous LLM-driven trader.  Two modes:
+ *   - OPEN-DECISION (no position): periodically asks the LLM whether to open.
+ *   - MANAGE (position open): periodically asks the LLM how to manage. Hard
+ *     safety overrides (cut-loss / tp-full) bypass the LLM entirely.
+ *
+ * See `apps/trader/src/strategies/llm-managed.ts` for the safety + cost model.
+ */
+async function runLlmManagedTick(params: {
+  alerter: WebhookAlerter;
+  client: ReturnType<typeof createBybitClient>;
+  config: TraderConfig;
+  observedAt: string;
+  positionRef: MutableRef<LlmManagedPosition | null>;
+  lastOpenDecisionAtRef: MutableRef<number>;
+  lastManageDecisionAtRef: MutableRef<number>;
+  lastCutLossAtRef: MutableRef<number>;
+  openPositionSymbolRef: MutableRef<string | null>;
+  positionLedger: ReturnType<typeof createPositionLedger>;
+  stateRef: MutableRef<TraderState>;
+  toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
+}): Promise<{ shouldContinueLoop: boolean }> {
+  const {
+    alerter, client, config, observedAt,
+    positionRef, lastOpenDecisionAtRef, lastManageDecisionAtRef, lastCutLossAtRef,
+    openPositionSymbolRef, positionLedger, stateRef, toPersistedTraderSnapshot,
+  } = params;
+  const now = Date.now();
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
+
+  const market = await collectLlmMarketContext(client, observedAt);
+  const pos = positionRef.get();
+
+  // ─────────────────────────── OPEN-DECISION MODE ──────────────────────────
+  if (pos === null) {
+    if (now < lastCutLossAtRef.get() + config.llmManagedPostCutLossCooldownMs) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-cooldown",
+        msRemaining: lastCutLossAtRef.get() + config.llmManagedPostCutLossCooldownMs - now,
+      }));
+      return { shouldContinueLoop: true };
+    }
+    if (now < lastOpenDecisionAtRef.get() + config.llmManagedOpenReviewIntervalSec * 1000) {
+      // Throttled — no log spam.
+      return { shouldContinueLoop: true };
+    }
+    lastOpenDecisionAtRef.set(now);
+
+    // Wallet available — best-effort fetch via the shared sizing helper.
+    let walletAvailableUsd = 0;
+    try {
+      const sizing = resolveWalletOrderUsd({
+        accountType: config.walletAccountType,
+        autoSizeFromWallet: true,
+        fallbackOrderUsd: 0,
+        maxOrderUsdCap: null,
+        walletBalanceResponse: await client.getWalletBalance(config.walletAccountType),
+        walletCoin: config.walletCoin,
+        walletFraction: 1,
+      });
+      walletAvailableUsd = sizing.walletAvailableUsd ?? 0;
+    } catch {
+      // Use 0 fallback.
+    }
+
+    const decision = await llmManagedGetOpenDecision({
+      market,
+      walletAvailableUsd,
+      recentTrades: 0,
+      recentWinRate: 0,
+      recentNetPnlUsd: stateRef.get().realizedPnlUsd,
+      allowedSymbols: config.llmManagedAllowedSymbols,
+      maxNotionalUsd: config.llmManagedMaxNotionalUsd,
+      maxLeverage: config.llmManagedMaxLeverage,
+      apiKey,
+      model: config.llmManagedModel,
+      timeoutMs: config.llmManagedTimeoutMs,
+    });
+
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "llm-managed-open-decision",
+      action: decision.action,
+      reasoning: decision.reasoning,
+      symbol: decision.symbol,
+      side: decision.side,
+      notionalUsd: decision.notionalUsd,
+      leverage: decision.leverage,
+      targetPnlUsd: decision.targetPnlUsd,
+      maxLossUsd: decision.maxLossUsd,
+    }));
+
+    if (decision.action !== "open") return { shouldContinueLoop: true };
+
+    // ── Validate + clamp the LLM's open request ────────────────────────────
+    const symbol = decision.symbol!;
+    if (!config.llmManagedAllowedSymbols.includes(symbol)) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-open-rejected",
+        reason: "symbol-not-allowed",
+        symbol,
+      }));
+      await alerter.send(`llm-managed rejected: symbol-not-allowed (${symbol})`).catch(() => {});
+      return { shouldContinueLoop: true };
+    }
+    const clampedNotional = Math.min(
+      decision.notionalUsd ?? config.llmManagedMaxNotionalUsd,
+      config.llmManagedMaxNotionalUsd,
+    );
+    const clampedLeverage = Math.max(1, Math.min(
+      decision.leverage ?? config.llmManagedMaxLeverage,
+      config.llmManagedMaxLeverage,
+    ));
+    if (clampedNotional <= 0) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-open-rejected",
+        reason: "non-positive-notional",
+      }));
+      return { shouldContinueLoop: true };
+    }
+
+    // Fetch entry price.
+    let entryPrice = 0;
+    try {
+      const t = await client.getTicker({ category: "linear", symbol });
+      entryPrice = Number(t.lastPrice);
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: observedAt,
+        event: "llm-managed-open-rejected",
+        reason: "ticker-unavailable",
+        symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      return { shouldContinueLoop: true };
+    }
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) return { shouldContinueLoop: true };
+    const qty = clampedNotional / entryPrice;
+
+    // Set leverage (live only).
+    if (!config.paperTrading) {
+      try {
+        await client.setLeverage({
+          category: "linear",
+          symbol,
+          buyLeverage: clampedLeverage.toString(),
+          sellLeverage: clampedLeverage.toString(),
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          ts: observedAt,
+          event: "llm-managed-set-leverage-failed",
+          symbol,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        // Continue anyway — Bybit may have already set this leverage.
+      }
+      try {
+        await client.createOrder({
+          category: "linear",
+          symbol,
+          side: decision.side === "long" ? "Buy" : "Sell",
+          qty: qty.toString(),
+          orderType: "Market",
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          ts: observedAt,
+          event: "llm-managed-open-order-failed",
+          symbol,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        await alerter.send(`llm-managed open order failed: ${symbol}`).catch(() => {});
+        return { shouldContinueLoop: true };
+      }
+    }
+
+    const newPos: LlmManagedPosition = {
+      symbol,
+      side: decision.side!,
+      entryPrice,
+      qty,
+      notionalUsd: clampedNotional,
+      leverage: clampedLeverage,
+      openedAt: now,
+      targetPnlUsd: decision.targetPnlUsd ?? 0,
+      maxLossUsd: decision.maxLossUsd ?? config.llmManagedMaxAbsoluteLossUsd,
+      entryReasoning: decision.reasoning,
+      mfeUsd: 0,
+      maeUsd: 0,
+      decisionsHistory: [],
+      hedge: null,
+    };
+    positionRef.set(newPos);
+    openPositionSymbolRef.set(symbol);
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "llm-managed-opened",
+      symbol, side: newPos.side, qty, entryPrice,
+      notionalUsd: clampedNotional, leverage: clampedLeverage,
+      targetPnlUsd: newPos.targetPnlUsd, maxLossUsd: newPos.maxLossUsd,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // ─────────────────────────── MANAGE MODE ─────────────────────────────────
+  // Refresh price + excursions every tick.
+  let currentPrice = pos.entryPrice;
+  try {
+    const t = await client.getTicker({ category: "linear", symbol: pos.symbol });
+    const p = Number(t.lastPrice);
+    if (Number.isFinite(p) && p > 0) currentPrice = p;
+  } catch (err) {
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "llm-managed-ticker-unavailable",
+      symbol: pos.symbol,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  const currentPnlUsd = llmManagedComputePnlUsd(pos, currentPrice);
+  const currentPnlBps = llmManagedComputePnlBps(pos, currentPrice);
+  const minutesHeld = (now - pos.openedAt) / 60_000;
+  const updatedPos = llmManagedUpdateExcursions(pos, currentPnlUsd);
+  if (updatedPos !== pos) positionRef.set(updatedPos);
+
+  // Hard safety overrides BEFORE any LLM call.
+  const override = llmManagedCheckSafetyOverride({
+    position: updatedPos,
+    currentPnlUsd,
+    minutesHeld,
+    maxAbsoluteLossUsd: config.llmManagedMaxAbsoluteLossUsd,
+    maxHoldHours: config.llmManagedMaxHoldHours,
+  });
+  if (override) {
+    console.log(JSON.stringify({
+      ts: observedAt,
+      event: "llm-managed-safety-trigger",
+      rule: override.reasoning,
+      action: override.action,
+      currentPnlUsd, minutesHeld,
+    }));
+    await alerter.send(
+      `llm-managed safety: ${override.reasoning} → ${override.action} (pnl=${currentPnlUsd.toFixed(2)})`,
+    ).catch(() => {});
+    // Push to history so the operator can audit forced decisions too.
+    const nextPos = positionRef.get();
+    if (nextPos) {
+      positionRef.set({
+        ...nextPos,
+        decisionsHistory: [
+          ...nextPos.decisionsHistory,
+          { at: now, action: override.action, reasoning: override.reasoning },
+        ],
+      });
+    }
+    await executeLlmManagedAction({
+      alerter, client, config, decision: override, observedAt,
+      positionRef, openPositionSymbolRef, stateRef, currentPrice,
+      positionLedger, toPersistedTraderSnapshot,
+      setLastCutLossAt: (at) => lastCutLossAtRef.set(at),
+    });
+    return { shouldContinueLoop: true };
+  }
+
+  // Throttle manage reviews.
+  if (now < lastManageDecisionAtRef.get() + config.llmManagedManageReviewIntervalSec * 1000) {
+    return { shouldContinueLoop: true };
+  }
+  lastManageDecisionAtRef.set(now);
+
+  const manage = await llmManagedGetManageDecision({
+    position: updatedPos,
+    currentPrice,
+    currentPnlUsd,
+    currentPnlBps,
+    minutesHeld,
+    market,
+    apiKey,
+    model: config.llmManagedModel,
+    timeoutMs: config.llmManagedTimeoutMs,
+  });
+
+  console.log(JSON.stringify({
+    ts: observedAt,
+    event: "llm-managed-decision",
+    action: manage.action,
+    reasoning: manage.reasoning,
+    params: manage.params,
+    currentPrice, currentPnlUsd, currentPnlBps, minutesHeld,
+  }));
+
+  // Record decision in history first (even on no-op holds).
+  const posForHistory = positionRef.get();
+  if (posForHistory) {
+    positionRef.set({
+      ...posForHistory,
+      decisionsHistory: [
+        ...posForHistory.decisionsHistory,
+        { at: now, action: manage.action, reasoning: manage.reasoning },
+      ],
+    });
+  }
+
+  await executeLlmManagedAction({
+    alerter, client, config, decision: manage, observedAt,
+    positionRef, openPositionSymbolRef, stateRef, currentPrice,
+    positionLedger, toPersistedTraderSnapshot,
+    setLastCutLossAt: (at) => lastCutLossAtRef.set(at),
+  });
   return { shouldContinueLoop: true };
 }
 
@@ -2995,6 +3720,11 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     let bollingerAdxKlineCache: BollingerAdxKlineCache | null = null;
     // calendar-spread state
     let calendarPosition: CalendarPosition | null = null;
+    // llm-managed state
+    let llmManagedPosition: LlmManagedPosition | null = null;
+    let llmManagedLastOpenDecisionAt = 0;
+    let llmManagedLastManageDecisionAt = 0;
+    let llmManagedLastCutLossAt = 0;
     let cachedRankedSetups: RankedTradeSetup[] = [];
     let lastScanAt = 0;
     let lastScanGeneratedAt: string | null = null;
@@ -3024,6 +3754,44 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       state = rolloverDailyPnlIfNeeded(state, Date.now());
 
       // ── Strategy dispatch: non-MA strategies short-circuit the MA loop. ──
+      if (config.strategyType === "llm-managed") {
+        const handled = await runLlmManagedTick({
+          alerter,
+          client,
+          config,
+          observedAt,
+          positionRef: {
+            get: () => llmManagedPosition,
+            set: (v) => { llmManagedPosition = v; },
+          },
+          lastOpenDecisionAtRef: {
+            get: () => llmManagedLastOpenDecisionAt,
+            set: (v) => { llmManagedLastOpenDecisionAt = v; },
+          },
+          lastManageDecisionAtRef: {
+            get: () => llmManagedLastManageDecisionAt,
+            set: (v) => { llmManagedLastManageDecisionAt = v; },
+          },
+          lastCutLossAtRef: {
+            get: () => llmManagedLastCutLossAt,
+            set: (v) => { llmManagedLastCutLossAt = v; },
+          },
+          openPositionSymbolRef: {
+            get: () => openPositionSymbol,
+            set: (v) => { openPositionSymbol = v; },
+          },
+          positionLedger,
+          stateRef: {
+            get: () => state,
+            set: (v) => { state = v; },
+          },
+          toPersistedTraderSnapshot: (p) => toPersistedTraderSnapshot(p),
+        });
+        ticks += 1;
+        if (!handled.shouldContinueLoop) break;
+        if (config.pollMs > 0) await sleep(config.pollMs);
+        continue;
+      }
       if (config.strategyType === "calendar-spread") {
         const handled = await runCalendarSpreadTick({
           alerter,
