@@ -723,6 +723,9 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   let championIdAtEntry: string | null = null;
   let lastAllocatorFlushTick = 0;
   const championClampedSymbols = new Set<string>();
+  // Tick-log throttling: emit full diagnostic only on state change or every N ticks.
+  let lastTickSignature: string | null = null;
+  const verboseHeartbeatTicks = Math.max(config.runtimeArtifactFlushTicks, 30);
   try {
     const persistedSnapshot = await positionLedger.loadSnapshot();
     if (persistedSnapshot) {
@@ -1566,53 +1569,57 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       marketScanGateGeneratedAt: marketScanGate.generatedAt,
     });
 
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      symbol: activeSymbol,
-      activeSymbolReason,
-      candidateSymbols: rankedSymbols,
-      rankedSymbols,
-      rankedSetupsTop: summarizeTopRankedSetups(resolvedRankedSetups),
-      lastPrice,
-      markPrice,
-      ticks: prices.length,
-      action,
-      intent,
-      intentReason,
-      scanScore: activeSetup?.score ?? null,
-      scanNetEdgeBps: activeSetup?.netEdgeBps ?? null,
-      scanTrendBps: activeSetup?.trendBps ?? null,
-      leverage: activeLeverage,
-      baseLeverage,
-      effectiveOrderUsd: effectiveOrderUsdPreClamp,
-      championId,
-      championReason,
-      championLeverage: championParams.leverage,
-      championOrderUsd: championParams.orderUsd,
-      championStopLossBps: championParams.stopLossBps,
-      championTakeProfitBps: championParams.takeProfitBps,
-      walletAvailableUsd: walletSizing.walletAvailableUsd,
-      walletSizingReason: walletSizing.reason,
-      leverageDecision: leverageDecision.reason,
-      exceptionalLeverage: leverageDecision.exceptional,
-      entryExecutionMode: config.entryExecutionMode,
-      lastExecution,
+    // Build a signature that captures "material state" — emit verbose only when it changes
+    // OR every verboseHeartbeatTicks. Compact one-liner otherwise.
+    const positionKey = state.position ? `${state.position.side}@${state.position.entryPrice}` : "flat";
+    const riskKey = risk.allowed ? "ok" : risk.reason;
+    const aggRiskKey = aggressiveRisk.allowed ? "ok" : aggressiveRisk.reason;
+    const tickSignature = `${activeSymbol}|${action}|${intent}|${positionKey}|${riskKey}|${aggRiskKey}|${championId ?? "-"}|${exitReason ?? "-"}`;
+    const isMaterialChange = tickSignature !== lastTickSignature;
+    const isHeartbeat = ticks % verboseHeartbeatTicks === 0;
 
-      tradingProfile: config.tradingProfile,
-      marketScanGate: marketScanGate.reason,
-      marketScanGateGeneratedAt: marketScanGate.generatedAt,
-      scanGate: scanGate.reason,
-      scanGateGeneratedAt: scanGate.generatedAt,
-      ...maybeAggressiveLogFields(config, activeAggressiveAllowedSymbols),
-      fundingRateBps,
-      realizedPnlUsd: state.realizedPnlUsd,
-      exitReason,
-      risk: risk.allowed ? "allowed" : risk.reason,
-      aggressiveRisk: aggressiveRisk.allowed ? "allowed" : aggressiveRisk.reason,
-      position: state.position,
-      mode: config.paperTrading ? "paper" : "live",
-      runtimeArtifactPath,
-    }));
+    if (isMaterialChange || isHeartbeat) {
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "tick",
+        symbol: activeSymbol,
+        activeSymbolReason,
+        rankedSetupsTop: summarizeTopRankedSetups(resolvedRankedSetups),
+        lastPrice,
+        markPrice,
+        action,
+        intent,
+        intentReason,
+        scanScore: activeSetup?.score ?? null,
+        scanNetEdgeBps: activeSetup?.netEdgeBps ?? null,
+        leverage: activeLeverage,
+        effectiveOrderUsd: effectiveOrderUsdPreClamp,
+        championId,
+        championReason,
+        walletAvailableUsd: walletSizing.walletAvailableUsd,
+        leverageDecision: leverageDecision.reason,
+        lastExecution,
+        fundingRateBps,
+        realizedPnlUsd: state.realizedPnlUsd,
+        exitReason,
+        risk: riskKey,
+        aggressiveRisk: aggRiskKey,
+        position: state.position,
+        mode: config.paperTrading ? "paper" : "live",
+      }));
+      lastTickSignature = tickSignature;
+    } else {
+      // Compact heartbeat: enough to confirm the bot is alive, not noisy.
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "tick-quiet",
+        symbol: activeSymbol,
+        lastPrice,
+        action,
+        position: state.position ? state.position.side : null,
+        pnl: Number(state.realizedPnlUsd.toFixed(4)),
+      }));
+    }
 
     // Persist allocator state on cadence (runtimeArtifactFlushTicks).
     if (

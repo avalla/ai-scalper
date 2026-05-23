@@ -213,15 +213,19 @@ const worker = new Worker<MarketScanJobData>(
       scanJobTimeoutMs,
       JOB_NAMES.marketScanRun,
     );
-    await logJob(job, `scan-completed candidates=${result.candidates.length}`);
-
+    const topSymbols = result.candidates.slice(0, 5).map((c) => ({
+      symbol: c.symbol,
+      score: c.score,
+      netEdgeBps: c.netEdgeBps,
+    }));
+    await logJob(job, `scan-completed candidates=${result.candidates.length} top=${topSymbols.map((c) => c.symbol).join(",")}`);
     console.log(JSON.stringify({
-      worker: QUEUE_NAMES.marketScan,
+      event: "market-scan-summary",
       jobId: job.id,
-      requestedAt: job.data.requestedAt,
       trigger: job.data.trigger,
-      result,
-    }, null, 2));
+      candidateCount: result.candidates.length,
+      top: topSymbols,
+    }));
 
     return result;
   },
@@ -287,56 +291,19 @@ const liveSessionWorker = new Worker<TraderSessionJobData>(
   },
 );
 
-worker.on("failed", (job, error) => {
+// Failure listeners only — completions are already logged by logJob inside each worker fn.
+const logFailure = (queueName: string) => (job: unknown, error: Error) => {
+  const jobId = (job as { id?: string } | null)?.id ?? null;
   console.error(JSON.stringify({
-    worker: QUEUE_NAMES.marketScan,
-    jobId: job?.id ?? null,
-    status: "failed",
+    event: "job-failed",
+    queue: queueName,
+    jobId,
     error: error.message,
-  }, null, 2));
-});
-
-worker.on("completed", (job) => {
-  console.log(JSON.stringify({
-    worker: QUEUE_NAMES.marketScan,
-    jobId: job.id,
-    status: "completed",
-  }, null, 2));
-});
-
-paperSessionWorker.on("failed", (job, error) => {
-  console.error(JSON.stringify({
-    worker: QUEUE_NAMES.paperSession,
-    jobId: job?.id ?? null,
-    status: "failed",
-    error: error.message,
-  }, null, 2));
-});
-
-paperSessionWorker.on("completed", (job) => {
-  console.log(JSON.stringify({
-    worker: QUEUE_NAMES.paperSession,
-    jobId: job.id,
-    status: "completed",
-  }, null, 2));
-});
-
-liveSessionWorker.on("failed", (job, error) => {
-  console.error(JSON.stringify({
-    worker: QUEUE_NAMES.liveSession,
-    jobId: job?.id ?? null,
-    status: "failed",
-    error: error.message,
-  }, null, 2));
-});
-
-liveSessionWorker.on("completed", (job) => {
-  console.log(JSON.stringify({
-    worker: QUEUE_NAMES.liveSession,
-    jobId: job.id,
-    status: "completed",
-  }, null, 2));
-});
+  }));
+};
+worker.on("failed", logFailure(QUEUE_NAMES.marketScan));
+paperSessionWorker.on("failed", logFailure(QUEUE_NAMES.paperSession));
+liveSessionWorker.on("failed", logFailure(QUEUE_NAMES.liveSession));
 
 async function main(): Promise<void> {
   await queue.waitUntilReady();
@@ -347,38 +314,20 @@ async function main(): Promise<void> {
   await liveSessionWorker.waitUntilReady();
 
   console.log(JSON.stringify({
-    worker: QUEUE_NAMES.marketScan,
-    status: "ready",
-  }, null, 2));
-  console.log(JSON.stringify({
-    worker: QUEUE_NAMES.paperSession,
-    status: "ready",
-  }, null, 2));
-  console.log(JSON.stringify({
-    worker: QUEUE_NAMES.liveSession,
-    status: "ready",
-  }, null, 2));
+    event: "workers-ready",
+    queues: [QUEUE_NAMES.marketScan, QUEUE_NAMES.paperSession, QUEUE_NAMES.liveSession],
+    scheduler: scanScheduleEnabled
+      ? { enabled: true, runOnStart: scanScheduleRunOnStart, scheduleMinutes: scanScheduleMinutes }
+      : { enabled: false },
+  }));
 
   if (scanScheduleEnabled) {
-    console.log(JSON.stringify({
-      worker: QUEUE_NAMES.marketScan,
-      scheduler: "enabled",
-      runOnStart: scanScheduleRunOnStart,
-      scheduleMinutes: scanScheduleMinutes,
-    }, null, 2));
-
     if (scanScheduleRunOnStart) {
       await enqueueScheduledScan("schedule");
     }
-
     setInterval(() => {
       void enqueueScheduledScan("schedule");
     }, scanScheduleMinutes * 60_000);
-  } else {
-    console.log(JSON.stringify({
-      worker: QUEUE_NAMES.marketScan,
-      scheduler: "disabled",
-    }, null, 2));
   }
 }
 
