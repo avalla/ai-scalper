@@ -1,3 +1,5 @@
+export { resolveProjectPath } from "./paths";
+
 export type StrategySnapshot = {
   prices: number[];
   fastWindow: number;
@@ -31,6 +33,7 @@ export type TraderState = {
   lastTradeAt: number | null;
   realizedPnlUsd: number;
   position: OpenPosition | null;
+  dayStartedAt: number | null;
 };
 
 export type MarketSnapshot = {
@@ -92,6 +95,21 @@ export interface ExceptionalLeveragePolicy {
   minHourlyMoveBps: number;
   minMinuteRangeBps: number;
   minNetEdgeBps: number;
+}
+
+function utcDayKey(epochMs: number): string {
+  const d = new Date(epochMs);
+  return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+}
+
+export function rolloverDailyPnlIfNeeded(state: TraderState, now: number): TraderState {
+  if (state.dayStartedAt === null) {
+    return { ...state, dayStartedAt: now };
+  }
+  if (utcDayKey(state.dayStartedAt) === utcDayKey(now)) {
+    return state;
+  }
+  return { ...state, realizedPnlUsd: 0, dayStartedAt: now };
 }
 
 function average(values: number[]): number {
@@ -160,7 +178,9 @@ export function evaluateRisk(params: {
     return { allowed: false, reason: "cooldown-active" };
   }
 
-  if (state.realizedPnlUsd <= -limits.maxDailyLossUsd) {
+  const sameUtcDay =
+    state.dayStartedAt !== null && utcDayKey(state.dayStartedAt) === utcDayKey(now);
+  if (sameUtcDay && state.realizedPnlUsd <= -limits.maxDailyLossUsd) {
     return { allowed: false, reason: "daily-loss-limit" };
   }
 
@@ -242,17 +262,19 @@ export function updatePaperState(params: {
   takeProfitBps: number;
   reduceOnly?: boolean;
 }): TraderState {
-  const previousPosition = params.previous.position;
+  const previous = rolloverDailyPnlIfNeeded(params.previous, params.now);
+  const previousPosition = previous.position;
 
   if (params.reduceOnly) {
     if (!previousPosition) {
-      return params.previous;
+      return previous;
     }
 
     return {
       lastTradeAt: params.now,
-      realizedPnlUsd: params.previous.realizedPnlUsd + realizedPnl(previousPosition, params.price),
+      realizedPnlUsd: previous.realizedPnlUsd + realizedPnl(previousPosition, params.price),
       position: null,
+      dayStartedAt: previous.dayStartedAt,
     };
   }
 
@@ -266,7 +288,8 @@ export function updatePaperState(params: {
 
   return {
     lastTradeAt: params.now,
-    realizedPnlUsd: params.previous.realizedPnlUsd,
+    realizedPnlUsd: previous.realizedPnlUsd,
+    dayStartedAt: previous.dayStartedAt,
     position: {
       side: params.action,
       quantity,

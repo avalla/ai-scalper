@@ -74,10 +74,18 @@ function parsePersistedTraderSnapshot(raw: string): PersistedTraderSnapshot | nu
     return null;
   }
 
+  const dayStartedAt =
+    parsed.dayStartedAt === undefined || parsed.dayStartedAt === null
+      ? null
+      : typeof parsed.dayStartedAt === "number"
+        ? parsed.dayStartedAt
+        : null;
+
   return {
     lastTradeAt: parsed.lastTradeAt as number | null,
     realizedPnlUsd: parsed.realizedPnlUsd,
     position: (position as OpenPosition | null) ?? null,
+    dayStartedAt,
     openPositionSymbol: (parsed.openPositionSymbol as string | null) ?? null,
     updatedAt: parsed.updatedAt,
   };

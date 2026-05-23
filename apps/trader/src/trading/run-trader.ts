@@ -535,6 +535,7 @@ function toPersistedTraderSnapshot(params: {
     lastTradeAt: params.state.lastTradeAt,
     realizedPnlUsd: params.state.realizedPnlUsd,
     position: params.state.position,
+    dayStartedAt: params.state.dayStartedAt,
     openPositionSymbol: params.openPositionSymbol,
     updatedAt: new Date().toISOString(),
   };
@@ -625,6 +626,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     lastTradeAt: null,
     realizedPnlUsd: 0,
     position: null,
+    dayStartedAt: null,
   };
   try {
     const persistedSnapshot = await positionLedger.loadSnapshot();
@@ -670,6 +672,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         lastTradeAt: hydratedSnapshot.lastTradeAt,
         realizedPnlUsd: hydratedSnapshot.realizedPnlUsd,
         position: hydratedSnapshot.position,
+        dayStartedAt: hydratedSnapshot.dayStartedAt,
       };
       openPositionSymbol = hydratedSnapshot.openPositionSymbol;
     }

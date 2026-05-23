@@ -6,6 +6,7 @@ import {
   evaluateRisk,
   getExitReason,
   selectLeverageForOpportunity,
+  rolloverDailyPnlIfNeeded,
   scoreScalpCandidate,
   updatePaperState,
 } from "../src/index";
@@ -50,6 +51,7 @@ describe("evaluateRisk", () => {
         lastTradeAt: null,
         realizedPnlUsd: 0,
         position: null,
+        dayStartedAt: null,
       },
     })).toEqual({
       allowed: false,
@@ -76,6 +78,7 @@ describe("evaluateRisk", () => {
         lastTradeAt: null,
         realizedPnlUsd: 0,
         position: null,
+        dayStartedAt: null,
       },
     })).toEqual({
       allowed: false,
@@ -95,6 +98,7 @@ describe("paper trading state", () => {
         lastTradeAt: null,
         realizedPnlUsd: 0,
         position: null,
+        dayStartedAt: null,
       },
       now: 1,
       stopLossBps: 20,
@@ -160,6 +164,7 @@ describe("paper trading state", () => {
         lastTradeAt: null,
         realizedPnlUsd: 0,
         position: null,
+        dayStartedAt: null,
       },
       now: 1,
       stopLossBps: 20,
@@ -393,7 +398,7 @@ describe("evaluateRisk - additional cases", () => {
     maxSpreadBps: 20,
   };
   const baseMarket = { lastPrice: 100, markPrice: 100 };
-  const cleanState = { lastTradeAt: null, realizedPnlUsd: 0, position: null };
+  const cleanState = { lastTradeAt: null, realizedPnlUsd: 0, position: null, dayStartedAt: null };
 
   test("allows a valid trade", () => {
     expect(evaluateRisk({
@@ -429,15 +434,26 @@ describe("evaluateRisk - additional cases", () => {
     })).toEqual({ allowed: false, reason: "cooldown-active" });
   });
 
-  test("blocks when daily loss limit is reached", () => {
+  test("blocks when daily loss limit is reached on same UTC day", () => {
     expect(evaluateRisk({
       action: "long",
       limits: baseLimits,
       market: baseMarket,
       now: 100_000,
       orderUsd: 50,
-      state: { ...cleanState, realizedPnlUsd: -50 },
+      state: { ...cleanState, realizedPnlUsd: -50, dayStartedAt: 100_000 },
     })).toEqual({ allowed: false, reason: "daily-loss-limit" });
+  });
+
+  test("does not block when realized PnL is from a prior UTC day", () => {
+    expect(evaluateRisk({
+      action: "long",
+      limits: baseLimits,
+      market: baseMarket,
+      now: 100_000,
+      orderUsd: 50,
+      state: { ...cleanState, realizedPnlUsd: -50, dayStartedAt: null },
+    })).toEqual({ allowed: true });
   });
 });
 
@@ -447,7 +463,7 @@ describe("getExitReason", () => {
     leverage: 5,
     notionalUsd: 100,
     price: 100,
-    previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null },
+    previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null, dayStartedAt: null },
     now: 1,
     stopLossBps: 20,
     takeProfitBps: 30,
@@ -458,7 +474,7 @@ describe("getExitReason", () => {
     leverage: 3,
     notionalUsd: 90,
     price: 100,
-    previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null },
+    previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null, dayStartedAt: null },
     now: 1,
     stopLossBps: 20,
     takeProfitBps: 30,
@@ -468,7 +484,7 @@ describe("getExitReason", () => {
     expect(getExitReason({
       marketPrice: 100,
       signal: "flat",
-      state: { lastTradeAt: null, realizedPnlUsd: 0, position: null },
+      state: { lastTradeAt: null, realizedPnlUsd: 0, position: null, dayStartedAt: null },
     })).toBeNull();
   });
 
@@ -504,7 +520,7 @@ describe("updatePaperState - additional cases", () => {
       leverage: 3,
       notionalUsd: 90,
       price: 100,
-      previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null },
+      previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null, dayStartedAt: null },
       now: 1,
       stopLossBps: 20,
       takeProfitBps: 30,
@@ -514,9 +530,9 @@ describe("updatePaperState - additional cases", () => {
     expect(state.position?.takeProfitPrice).toBeCloseTo(99.7);
   });
 
-  test("reduceOnly with no open position is a no-op", () => {
-    const prev = { lastTradeAt: null as number | null, realizedPnlUsd: 5, position: null };
-    expect(updatePaperState({
+  test("reduceOnly with no open position is a no-op (preserves PnL, initializes dayStartedAt)", () => {
+    const prev = { lastTradeAt: null as number | null, realizedPnlUsd: 5, position: null, dayStartedAt: null };
+    const result = updatePaperState({
       action: "long",
       leverage: 1,
       notionalUsd: 100,
@@ -526,7 +542,10 @@ describe("updatePaperState - additional cases", () => {
       stopLossBps: 20,
       takeProfitBps: 30,
       reduceOnly: true,
-    })).toBe(prev);
+    });
+    expect(result.position).toBeNull();
+    expect(result.realizedPnlUsd).toBe(5);
+    expect(result.dayStartedAt).toBe(1);
   });
 });
 
@@ -660,5 +679,45 @@ describe("selectLeverageForOpportunity - additional gates", () => {
       netEdgeBps: 5,
       policy: basePolicy,
     })).toMatchObject({ leverage: 25, exceptional: false, reason: "net-edge-too-small" });
+  });
+});
+
+describe("rolloverDailyPnlIfNeeded", () => {
+  const t0 = Date.UTC(2026, 0, 15, 10, 0, 0);
+  test("same UTC day leaves realized PnL unchanged", () => {
+    const state = {
+      lastTradeAt: t0,
+      realizedPnlUsd: -25,
+      position: null,
+      dayStartedAt: t0,
+    };
+    const result = rolloverDailyPnlIfNeeded(state, t0 + 2 * 60 * 60 * 1000);
+    expect(result.realizedPnlUsd).toBe(-25);
+    expect(result.dayStartedAt).toBe(t0);
+  });
+
+  test("crossing UTC day resets realized PnL and updates dayStartedAt", () => {
+    const state = {
+      lastTradeAt: t0,
+      realizedPnlUsd: -25,
+      position: null,
+      dayStartedAt: t0,
+    };
+    const nextDay = t0 + 24 * 60 * 60 * 1000;
+    const result = rolloverDailyPnlIfNeeded(state, nextDay);
+    expect(result.realizedPnlUsd).toBe(0);
+    expect(result.dayStartedAt).toBe(nextDay);
+  });
+
+  test("initializes dayStartedAt when null", () => {
+    const state = {
+      lastTradeAt: null,
+      realizedPnlUsd: 0,
+      position: null,
+      dayStartedAt: null,
+    };
+    const result = rolloverDailyPnlIfNeeded(state, t0);
+    expect(result.dayStartedAt).toBe(t0);
+    expect(result.realizedPnlUsd).toBe(0);
   });
 });
