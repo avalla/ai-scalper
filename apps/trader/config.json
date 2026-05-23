@@ -20,7 +20,8 @@
     "orderUsd": 5,
     "leverage": 3,
     "slippageTolerancePercent": 0.1,
-    "positionMode": "one-way"
+    "positionMode": "one-way",
+    "feeRoundTripBps": 11
   },
   "strategy": {
     "fastWindow": 5,

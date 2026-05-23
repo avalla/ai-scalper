@@ -261,6 +261,12 @@ export function updatePaperState(params: {
   stopLossBps: number;
   takeProfitBps: number;
   reduceOnly?: boolean;
+  /**
+   * Total round-trip fee in basis points to deduct from realized PnL on close.
+   * Default 0 = no fee tracking (legacy behaviour). Typical Bybit V5 linear:
+   * 11 bps for taker round-trip (0.055% x 2), ~5.5 bps for maker entry + taker exit.
+   */
+  feeRoundTripBps?: number;
 }): TraderState {
   const previous = rolloverDailyPnlIfNeeded(params.previous, params.now);
   const previousPosition = previous.position;
@@ -270,9 +276,13 @@ export function updatePaperState(params: {
       return previous;
     }
 
+    const grossPnl = realizedPnl(previousPosition, params.price);
+    const feeUsd = (params.feeRoundTripBps ?? 0) > 0
+      ? previousPosition.notionalUsd * ((params.feeRoundTripBps ?? 0) / 10_000)
+      : 0;
     return {
       lastTradeAt: params.now,
-      realizedPnlUsd: previous.realizedPnlUsd + realizedPnl(previousPosition, params.price),
+      realizedPnlUsd: previous.realizedPnlUsd + grossPnl - feeUsd,
       position: null,
       dayStartedAt: previous.dayStartedAt,
     };

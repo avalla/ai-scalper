@@ -129,6 +129,7 @@ function makeConfig(): TraderConfig {
     scanGateAutoTuneFallbackBps: 15,
     scanMinOpenInterestUsd: 0,
     scanMinListingAgeDays: 0,
+    feeRoundTripBps: 0,
   };
 }
 
@@ -342,10 +343,10 @@ describe("shadow integration", () => {
       t++;
     }
 
-    // The retuned BTC-only 100x variant has stopLossBps=10 → buffer = 100 - 10 = 90 ≥ 50.
+    // The retuned BTC-only 100x variant has stopLossBps=12 → buffer = 100 - 12 = 88 ≥ 50.
     const extreme = variants.find((v) => v.id === "agg-100x-btc-only")!;
     expect(extreme.params.leverage).toBe(100);
-    expect(extreme.params.stopLossBps).toBe(10);
+    expect(extreme.params.stopLossBps).toBe(12);
     const liqDistance = 10_000 / extreme.params.leverage;
     expect(liqDistance - extreme.params.stopLossBps).toBeGreaterThanOrEqual(50);
 

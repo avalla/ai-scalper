@@ -626,7 +626,13 @@ function buildClosedPositionLedgerEntry(params: {
   previousState: TraderState;
   previousPosition: NonNullable<TraderState["position"]>;
   symbol: string;
+  feeRoundTripBps: number;
 }): ClosedPositionLedgerEntry {
+  const netPnl = params.nextState.realizedPnlUsd - params.previousState.realizedPnlUsd;
+  const feeUsd = params.feeRoundTripBps > 0
+    ? params.previousPosition.notionalUsd * (params.feeRoundTripBps / 10_000)
+    : 0;
+  const grossPnl = netPnl + feeUsd;
   return {
     closedAt: new Date().toISOString(),
     cumulativeRealizedPnlUsd: params.nextState.realizedPnlUsd,
@@ -637,7 +643,9 @@ function buildClosedPositionLedgerEntry(params: {
     notionalUsd: params.previousPosition.notionalUsd,
     openedAt: new Date(params.previousPosition.openedAt).toISOString(),
     quantity: params.previousPosition.quantity,
-    realizedPnlUsd: params.nextState.realizedPnlUsd - params.previousState.realizedPnlUsd,
+    realizedPnlUsd: netPnl,
+    grossPnlUsd: grossPnl,
+    feeUsd,
     side: params.previousPosition.side,
     stopLossPrice: params.previousPosition.stopLossPrice,
     symbol: params.symbol,
@@ -1208,6 +1216,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           instrument,
           now: Date.now(),
           priceHistory: variantPriceHistory,
+          feeRoundTripBps: config.feeRoundTripBps,
         };
         const result = step(ctxV, variant.params, prevVariantState);
         // Detect close: prev had position, next does not.
@@ -1466,6 +1475,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           stopLossBps: config.stopLossBps,
           takeProfitBps: config.takeProfitBps,
           reduceOnly: true,
+          feeRoundTripBps: config.feeRoundTripBps,
         });
         openPositionSymbol = null;
         safetyStopPlaced = false;
@@ -1490,6 +1500,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             previousState,
             previousPosition,
             symbol: activeSymbol,
+            feeRoundTripBps: config.feeRoundTripBps,
           }));
         }
         await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
@@ -1577,6 +1588,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           stopLossBps: config.stopLossBps,
           takeProfitBps: config.takeProfitBps,
           reduceOnly: true,
+          feeRoundTripBps: config.feeRoundTripBps,
         });
         openPositionSymbol = null;
         safetyStopPlaced = false;
@@ -1600,6 +1612,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             previousState,
             previousPosition,
             symbol: activeSymbol,
+            feeRoundTripBps: config.feeRoundTripBps,
           }));
         }
         await positionLedger.syncSnapshot(toPersistedTraderSnapshot({

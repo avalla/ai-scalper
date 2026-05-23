@@ -51,6 +51,8 @@ export interface StepContext {
   aggressivePerpsLimits?: AggressivePerpsLimits;
   /** Funding rate (bps) at this tick. Required iff aggressivePerpsLimits is set. */
   fundingRateBps?: number;
+  /** Round-trip fee in bps for net-PnL accounting (default 0 = ignore fees). */
+  feeRoundTripBps?: number;
 }
 
 export interface StepResult {
@@ -207,6 +209,7 @@ export function step(
       stopLossBps: params.stopLossBps,
       takeProfitBps: params.takeProfitBps,
       reduceOnly: true,
+      feeRoundTripBps: ctx.feeRoundTripBps,
     });
     fillPrice = lastPrice;
   }

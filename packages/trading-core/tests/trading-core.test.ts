@@ -513,6 +513,61 @@ describe("getExitReason", () => {
   });
 });
 
+describe("updatePaperState - fee tracking", () => {
+  test("deducts feeRoundTripBps from realizedPnlUsd on close", () => {
+    const opened = updatePaperState({
+      action: "long",
+      leverage: 10,
+      notionalUsd: 1000,
+      price: 100,
+      previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null, dayStartedAt: null },
+      now: 1,
+      stopLossBps: 20,
+      takeProfitBps: 30,
+    });
+    expect(opened.position).not.toBeNull();
+    const closed = updatePaperState({
+      action: "short",
+      leverage: 10,
+      notionalUsd: 1000,
+      price: 100.3, // +30bps gross
+      previous: opened,
+      now: 2,
+      stopLossBps: 20,
+      takeProfitBps: 30,
+      reduceOnly: true,
+      feeRoundTripBps: 11, // 0.11% of 1000 notional = $1.10 fee
+    });
+    // gross PnL = 10 units × 0.3 = 3, minus $1.10 fee = $1.90
+    expect(closed.realizedPnlUsd).toBeCloseTo(1.9, 2);
+  });
+
+  test("feeRoundTripBps=0 (default) preserves legacy behaviour", () => {
+    const opened = updatePaperState({
+      action: "long",
+      leverage: 10,
+      notionalUsd: 1000,
+      price: 100,
+      previous: { lastTradeAt: null, realizedPnlUsd: 0, position: null, dayStartedAt: null },
+      now: 1,
+      stopLossBps: 20,
+      takeProfitBps: 30,
+    });
+    const closed = updatePaperState({
+      action: "short",
+      leverage: 10,
+      notionalUsd: 1000,
+      price: 100.3,
+      previous: opened,
+      now: 2,
+      stopLossBps: 20,
+      takeProfitBps: 30,
+      reduceOnly: true,
+    });
+    expect(closed.realizedPnlUsd).toBeCloseTo(3.0, 2);
+  });
+});
+
 describe("updatePaperState - additional cases", () => {
   test("opens a short position with correct stop-loss and take-profit prices", () => {
     const state = updatePaperState({

@@ -94,6 +94,7 @@ export interface TraderConfig {
   scanGateAutoTuneFallbackBps: number;
   scanMinOpenInterestUsd: number;
   scanMinListingAgeDays: number;
+  feeRoundTripBps: number;
 }
 
 function resolveIncludeAggressiveVariants(
@@ -271,5 +272,8 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     scanMinListingAgeDays: env.SCAN_MIN_LISTING_AGE_DAYS
       ? Number(env.SCAN_MIN_LISTING_AGE_DAYS)
       : ((cfg as { scanner?: { minListingAgeDays?: number } }).scanner?.minListingAgeDays ?? 0),
+    feeRoundTripBps: env.BYBIT_FEE_ROUND_TRIP_BPS
+      ? Number(env.BYBIT_FEE_ROUND_TRIP_BPS)
+      : ((cfg as { bybit?: { feeRoundTripBps?: number } }).bybit?.feeRoundTripBps ?? 0),
   };
 }

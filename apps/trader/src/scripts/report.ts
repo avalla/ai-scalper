@@ -28,7 +28,9 @@ export interface ReportResult {
   wins: number;
   losses: number;
   winRate: number;
-  totalPnl: number;
+  totalPnl: number;        // net (post-fee)
+  totalGrossPnl: number;   // pre-fee
+  totalFees: number;
   maxDrawdown: number;
   currentStreak: { kind: "win" | "loss" | "none"; length: number };
   largestWin: number;
@@ -48,6 +50,8 @@ export function computeReport(entries: ReportEntry[]): ReportResult {
       losses: 0,
       winRate: 0,
       totalPnl: 0,
+      totalGrossPnl: 0,
+      totalFees: 0,
       maxDrawdown: 0,
       currentStreak: { kind: "none", length: 0 },
       largestWin: 0,
@@ -70,6 +74,8 @@ export function computeReport(entries: ReportEntry[]): ReportResult {
   let wins = 0;
   let losses = 0;
   let totalPnl = 0;
+  let totalGrossPnl = 0;
+  let totalFees = 0;
   let largestWin = 0;
   let largestLoss = 0;
   let peak = 0;
@@ -85,6 +91,8 @@ export function computeReport(entries: ReportEntry[]): ReportResult {
     const pnl = entry.realizedPnlUsd;
     pnlSeries.push(pnl);
     totalPnl += pnl;
+    totalGrossPnl += entry.grossPnlUsd ?? pnl;
+    totalFees += entry.feeUsd ?? 0;
     cumulative += pnl;
     if (cumulative > peak) peak = cumulative;
     const dd = peak - cumulative;
@@ -161,6 +169,8 @@ export function computeReport(entries: ReportEntry[]): ReportResult {
     losses,
     winRate,
     totalPnl,
+    totalGrossPnl,
+    totalFees,
     maxDrawdown,
     currentStreak: { kind: streakKind, length: streakLength },
     largestWin,
@@ -211,7 +221,9 @@ export function printReport(report: ReportResult): void {
   console.log(`Total trades        : ${report.totalTrades}`);
   console.log(`Wins / Losses       : ${report.wins} / ${report.losses}`);
   console.log(`Win rate            : ${(report.winRate * 100).toFixed(2)}%`);
-  console.log(`Total realized PnL  : ${formatUsd(report.totalPnl)} USD`);
+  console.log(`Gross PnL (pre-fee) : ${formatUsd(report.totalGrossPnl)} USD`);
+  console.log(`Fees paid           : ${formatUsd(report.totalFees)} USD`);
+  console.log(`Net PnL (post-fee)  : ${formatUsd(report.totalPnl)} USD`);
   console.log(`Max drawdown        : ${formatUsd(report.maxDrawdown)} USD`);
   console.log(
     `Current streak      : ${report.currentStreak.kind} × ${report.currentStreak.length}`,

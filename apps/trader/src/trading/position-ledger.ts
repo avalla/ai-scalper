@@ -29,7 +29,12 @@ export interface ClosedPositionLedgerEntry {
   notionalUsd: number;
   openedAt: string;
   quantity: number;
+  /** Net PnL (gross minus fees) — what actually hits the wallet. */
   realizedPnlUsd: number;
+  /** Pre-fee gross PnL. Optional for backward-compat with old ledger entries. */
+  grossPnlUsd?: number;
+  /** Round-trip fee charged on this close. Optional for backward-compat. */
+  feeUsd?: number;
   side: OpenPosition["side"];
   stopLossPrice: number;
   symbol: string;
