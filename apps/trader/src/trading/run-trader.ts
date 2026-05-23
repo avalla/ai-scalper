@@ -1426,7 +1426,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         return "position-already-open";
       }
       if (prices.length < config.slowWindow) {
-        return `warmup:${prices.length}/${config.slowWindow}`;
+        return "warmup";
       }
       if (topSetupGateReason) {
         return `top-setup-gate:${topSetupGateReason}`;
