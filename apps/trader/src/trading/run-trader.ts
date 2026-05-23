@@ -12,11 +12,24 @@ import {
   evaluateAggressivePerpsRisk,
   evaluateRisk,
   getExitReason,
+  resolveProjectPath,
+  rolloverDailyPnlIfNeeded,
   selectLeverageForOpportunity,
   updatePaperState,
   type StrategySignal,
   type TraderState,
 } from "@ai-scalper/trading-core";
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { step, type StepContext } from "./step";
+import { defaultVariantPool, type Variant } from "../meta/variant-pool";
+import {
+  emptyAllocatorState,
+  loadAllocatorState,
+  persistAllocatorState,
+  recordClosedTrade,
+  selectChampion,
+  type AllocatorState,
+} from "../meta/allocator";
 import {
   rankTradeSetups,
   readScanConfig,
@@ -585,7 +598,64 @@ function isLivePositionAligned(params: {
   return sideMatches && Math.abs(liveSize - persistedPosition.quantity) < 0.000001;
 }
 
+function sessionLockPath(): string {
+  return resolveProjectPath("apps/trader/data/runtime/session.lock");
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "EPERM"; // EPERM = process exists but we can't signal it
+  }
+}
+
+function acquireSessionLock(): void {
+  const lockPath = sessionLockPath();
+  if (existsSync(lockPath)) {
+    try {
+      const contents = readFileSync(lockPath, "utf8").trim();
+      const pid = Number(contents);
+      if (Number.isFinite(pid) && pid > 0 && isPidAlive(pid)) {
+        throw new Error(`Another trader session is running (pid=${pid}). Refusing to start.`);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Another trader session")) {
+        throw err;
+      }
+      // stale lock — fall through and overwrite
+    }
+  }
+  writeFileSync(lockPath, String(process.pid), "utf8");
+}
+
+function releaseSessionLock(): void {
+  const lockPath = sessionLockPath();
+  try {
+    if (existsSync(lockPath)) {
+      const contents = readFileSync(lockPath, "utf8").trim();
+      if (contents === String(process.pid)) {
+        unlinkSync(lockPath);
+      }
+    }
+  } catch {
+    // best effort
+  }
+}
+
 export async function runTrader(config: TraderConfig): Promise<void> {
+  await mkdir(resolveProjectPath("apps/trader/data/runtime"), { recursive: true });
+  acquireSessionLock();
+
+  const releaseOnSignal = () => {
+    releaseSessionLock();
+    process.exit(0);
+  };
+  process.once("SIGINT", releaseOnSignal);
+  process.once("SIGTERM", releaseOnSignal);
+
   const client = createBybitClient();
   const positionLedger = createPositionLedger();
   const scanConfig = readScanConfig(process.env);
@@ -628,6 +698,13 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     position: null,
     dayStartedAt: null,
   };
+  // Meta-bandit scope (declared at function level for finally-block access).
+  let pool: Variant[] = [];
+  let allocator: AllocatorState | null = null;
+  const perVariantStates: Map<string, TraderState> = new Map();
+  let championIdAtEntry: string | null = null;
+  let lastAllocatorFlushTick = 0;
+  const championClampedSymbols = new Set<string>();
   try {
     const persistedSnapshot = await positionLedger.loadSnapshot();
     if (persistedSnapshot) {
@@ -693,8 +770,29 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     let lastScanAt = 0;
     let lastScanGeneratedAt: string | null = null;
 
+    // ── Meta-bandit setup (only when META_ENABLED) ──────────────────────────
+    if (config.metaEnabled) {
+      pool = defaultVariantPool(config);
+      const persisted = await loadAllocatorState();
+      if (persisted) {
+        allocator = persisted.allocator;
+      } else {
+        allocator = emptyAllocatorState();
+      }
+      for (const v of pool) {
+        perVariantStates.set(v.id, {
+          lastTradeAt: null,
+          realizedPnlUsd: 0,
+          position: null,
+          dayStartedAt: null,
+        });
+      }
+    }
+
     while (config.maxTicks === 0 || ticks < config.maxTicks) {
       const observedAt = new Date().toISOString();
+      // Daily rollover at top-of-tick — handles UTC day crossings even when idle.
+      state = rolloverDailyPnlIfNeeded(state, Date.now());
       if ((Date.now() - lastScanAt) >= config.tradeScanRefreshMs || cachedRankedSetups.length === 0) {
         cachedRankedSetups = await rankTradeSetups(scanConfig);
         lastScanAt = Date.now();
@@ -849,7 +947,6 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       await sleep(config.pollMs);
       continue;
     }
-    const baseLeverage = clampLeverage(config.leverage, instrument);
     let ticker;
     try {
       ticker = await client.getTicker({
@@ -932,6 +1029,90 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     symbolAvailability.set(activeSymbol, registerTickerSuccess(symbolAvailability.get(activeSymbol)));
     const markPrice = toNumber(ticker.markPrice);
     const fundingRateBps = toNumber(ticker.fundingRate) * 10_000;
+
+    // ── Meta-bandit: shadow-trade every variant, record closures ────────────
+    let championId: string | null = null;
+    let championReason: string = "meta-disabled";
+    let championParams: {
+      stopLossBps: number;
+      takeProfitBps: number;
+      leverage: number;
+      orderUsd: number;
+    } = {
+      stopLossBps: config.stopLossBps,
+      takeProfitBps: config.takeProfitBps,
+      leverage: config.leverage,
+      orderUsd: config.orderUsd,
+    };
+    if (config.metaEnabled && allocator && pool.length > 0) {
+      for (const variant of pool) {
+        const prevVariantState = perVariantStates.get(variant.id) ?? {
+          lastTradeAt: null,
+          realizedPnlUsd: 0,
+          position: null,
+          dayStartedAt: null,
+        };
+        const variantPriceHistory = [...(priceHistoryBySymbol.get(activeSymbol) ?? [])];
+        const ctxV: StepContext = {
+          symbol: activeSymbol,
+          ticker,
+          instrument,
+          now: Date.now(),
+          priceHistory: variantPriceHistory,
+        };
+        const result = step(ctxV, variant.params, prevVariantState);
+        // Detect close: prev had position, next does not.
+        if (prevVariantState.position && !result.state.position) {
+          const pnlDelta = result.state.realizedPnlUsd - prevVariantState.realizedPnlUsd;
+          allocator = recordClosedTrade(
+            allocator,
+            variant.id,
+            pnlDelta,
+            Date.now(),
+            config.metaPnlWindowSize,
+          );
+        }
+        perVariantStates.set(variant.id, result.state);
+      }
+      const champion = selectChampion({
+        allocator,
+        variants: pool,
+        now: Date.now(),
+        warmupMinTrades: config.metaWarmupMinTrades,
+      });
+      championId = champion.championId;
+      championReason = champion.reason;
+      const championVariant = pool.find((v) => v.id === championId);
+      if (championVariant) {
+        championParams = {
+          stopLossBps: championVariant.params.stopLossBps,
+          takeProfitBps: championVariant.params.takeProfitBps,
+          leverage: championVariant.params.leverage,
+          orderUsd: championVariant.params.orderUsd,
+        };
+      }
+    }
+
+    const effectiveLeverageRaw = config.metaEnabled ? championParams.leverage : config.leverage;
+    const effectiveStopLossBps = config.metaEnabled ? championParams.stopLossBps : config.stopLossBps;
+    const effectiveTakeProfitBps = config.metaEnabled ? championParams.takeProfitBps : config.takeProfitBps;
+    // User decision #1: clamp variant.orderUsd via min(variant.orderUsd, walletSizing.orderUsd).
+    const effectiveOrderUsdPreClamp = config.metaEnabled
+      ? Math.min(championParams.orderUsd, walletSizing.orderUsd)
+      : walletSizing.orderUsd;
+    if (config.metaEnabled && championParams.orderUsd > walletSizing.orderUsd) {
+      if (!championClampedSymbols.has(activeSymbol)) {
+        championClampedSymbols.add(activeSymbol);
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "champion-leverage-clamped",
+          symbol: activeSymbol,
+          championOrderUsd: championParams.orderUsd,
+          walletOrderUsd: walletSizing.orderUsd,
+        }));
+      }
+    }
+    const baseLeverage = clampLeverage(effectiveLeverageRaw, instrument);
     const bid = toNumber(ticker.bid1Price);
     const ask = toNumber(ticker.ask1Price);
     const mid = (bid + ask) / 2;
@@ -1025,6 +1206,18 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         openPositionSymbol = null;
         safetyStopPlaced = false;
         entryTick = null;
+        // Bandit reward from realized live PnL (user-decision #2).
+        if (config.metaEnabled && allocator && championIdAtEntry) {
+          const pnlDelta = state.realizedPnlUsd - previousState.realizedPnlUsd;
+          allocator = recordClosedTrade(
+            allocator,
+            championIdAtEntry,
+            pnlDelta,
+            Date.now(),
+            config.metaPnlWindowSize,
+          );
+        }
+        championIdAtEntry = null;
         if (previousPosition) {
           await positionLedger.appendClosedPosition(buildClosedPositionLedgerEntry({
             exitPrice: fillPrice,
@@ -1094,6 +1287,17 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         openPositionSymbol = null;
         safetyStopPlaced = false;
         entryTick = null;
+        if (config.metaEnabled && allocator && championIdAtEntry) {
+          const pnlDelta = state.realizedPnlUsd - previousState.realizedPnlUsd;
+          allocator = recordClosedTrade(
+            allocator,
+            championIdAtEntry,
+            pnlDelta,
+            Date.now(),
+            config.metaPnlWindowSize,
+          );
+        }
+        championIdAtEntry = null;
         if (previousPosition) {
           await positionLedger.appendClosedPosition(buildClosedPositionLedgerEntry({
             exitPrice: lastExecution.fillPrice,
@@ -1129,7 +1333,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       }
     }
 
-    const notionalUsd = computeNotionalUsd(effectiveOrderUsd, activeLeverage);
+    const notionalUsd = computeNotionalUsd(effectiveOrderUsdPreClamp, activeLeverage);
     const risk = evaluateRisk({
       action,
       limits: {
@@ -1218,11 +1422,31 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           price: entryExecution.fillPrice,
           previous: state,
           now: Date.now(),
-          stopLossBps: config.stopLossBps,
-          takeProfitBps: config.takeProfitBps,
+          stopLossBps: effectiveStopLossBps,
+          takeProfitBps: effectiveTakeProfitBps,
         });
         openPositionSymbol = activeSymbol;
         entryTick = ticks;
+        championIdAtEntry = championId;
+        // Exchange-native SL/TP for live mode (user-decision #2).
+        if (!config.paperTrading && config.exitPolicyMode === "exchange-native" && state.position) {
+          const decimals = countDecimals(instrument.priceFilter.tickSize);
+          const slPrice = state.position.stopLossPrice.toFixed(decimals);
+          const tpPrice = state.position.takeProfitPrice.toFixed(decimals);
+          await client.setTradingStop({
+            category: config.category,
+            symbol: activeSymbol,
+            stopLoss: slPrice,
+            takeProfit: tpPrice,
+            positionIdx: state.position.side === "long" ? 1 : 2,
+          }).catch((err: Error) => {
+            console.log(JSON.stringify({
+              ts: new Date().toISOString(),
+              event: "exchange-native-stop-failed",
+              error: err.message,
+            }));
+          });
+        }
         await positionLedger.syncSnapshot(toPersistedTraderSnapshot({
           openPositionSymbol,
           state,
@@ -1328,7 +1552,13 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       scanTrendBps: activeSetup?.trendBps ?? null,
       leverage: activeLeverage,
       baseLeverage,
-      effectiveOrderUsd,
+      effectiveOrderUsd: effectiveOrderUsdPreClamp,
+      championId,
+      championReason,
+      championLeverage: championParams.leverage,
+      championOrderUsd: championParams.orderUsd,
+      championStopLossBps: championParams.stopLossBps,
+      championTakeProfitBps: championParams.takeProfitBps,
       walletAvailableUsd: walletSizing.walletAvailableUsd,
       walletSizingReason: walletSizing.reason,
       leverageDecision: leverageDecision.reason,
@@ -1352,10 +1582,32 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       runtimeArtifactPath,
     }));
 
+    // Persist allocator state on cadence (runtimeArtifactFlushTicks).
+    if (
+      config.metaEnabled
+      && allocator
+      && ticks - lastAllocatorFlushTick >= config.runtimeArtifactFlushTicks
+    ) {
+      await persistAllocatorState({
+        allocator,
+        variantStates: Object.fromEntries(perVariantStates.entries()),
+        lastTickAt: Date.now(),
+      });
+      lastAllocatorFlushTick = ticks;
+    }
+
     ticks += 1;
     await sleep(config.pollMs);
   }
   } finally {
+    if (config.metaEnabled && allocator) {
+      await persistAllocatorState({
+        allocator,
+        variantStates: Object.fromEntries(perVariantStates.entries()),
+        lastTickAt: Date.now(),
+      }).catch(() => {});
+    }
     await positionLedger.close();
+    releaseSessionLock();
   }
 }
