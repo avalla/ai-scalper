@@ -112,6 +112,6 @@
   "scanGateAutoTune": {
     "enabled": true,
     "percentile": 50,
-    "fallbackBps": 10
+    "fallbackBps": 5
   }
 }

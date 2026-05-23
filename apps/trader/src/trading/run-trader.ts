@@ -996,12 +996,26 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       });
     }
 
-    const activeSymbol: string = openPositionSymbol ?? candidateSymbols[0] ?? config.symbol;
+    // Pick the highest-ranked candidate whose setup ALSO passes the gate (score + netEdge + action).
+    // Falls back to the bare #1 if no candidate passes — so we always have an active symbol to observe.
+    const minScoreForGate = config.tradeMinSetupScore;
+    const minEdgeForGate = effectiveMinSetupNetEdgeBps;
+    let pickedFromGate: string | null = null;
+    for (const sym of candidateSymbols) {
+      const setupForSym = resolvedRankedSetups.find((s) => s.symbol === sym) ?? null;
+      if (!evaluateTopSetupGate({ minScore: minScoreForGate, minNetEdgeBps: minEdgeForGate, setup: setupForSym })) {
+        pickedFromGate = sym;
+        break;
+      }
+    }
+    const activeSymbol: string = openPositionSymbol ?? pickedFromGate ?? candidateSymbols[0] ?? config.symbol;
     const activeSymbolReason = openPositionSymbol
       ? "open-position"
-      : candidateSymbols.length > 0
-        ? "scan-top"
-        : "fallback";
+      : pickedFromGate
+        ? "scan-gated"
+        : candidateSymbols.length > 0
+          ? "scan-top"
+          : "fallback";
     const activeSetup = resolvedRankedSetups.find((setup) => setup.symbol === activeSymbol) ?? null;
     const marketScanGate = {
       generatedAt: lastScanGeneratedAt,
