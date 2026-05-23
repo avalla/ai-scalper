@@ -97,8 +97,28 @@ export interface TraderConfig {
   scanExcludedSymbols: string[];
   feeRoundTripBps: number;
   requireLocalMaConfirmation: boolean;
-  // Strategy dispatch (Phase 2+: funding-arb, longer-tf, basis-arb strategies)
-  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb";
+  // Strategy dispatch (Phase 2+: funding-arb, longer-tf, basis-arb, pairs-trading, bollinger-adx)
+  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx";
+  // Pairs-trading strategy parameters (cointegration mean reversion across two symbols)
+  pairsLeg1Symbol: string;
+  pairsLeg2Symbol: string;
+  pairsWindowSize: number;
+  pairsEntryZ: number;
+  pairsExitZ: number;
+  pairsMaxHoldMinutes: number;
+  pairsMaxNotionalUsdPerLeg: number;
+  pairsKlineInterval: string;
+  pairsKlineRefreshSec: number;
+  // Bollinger + ADX regime-filter strategy parameters
+  bollingerAdxBbPeriod: number;
+  bollingerAdxBbStdDev: number;
+  bollingerAdxAdxPeriod: number;
+  bollingerAdxAdxRangingThreshold: number;
+  bollingerAdxAdxTrendingThreshold: number;
+  bollingerAdxStopLossBps: number;
+  bollingerAdxTakeProfitBps: number;
+  bollingerAdxKlineInterval: string;
+  bollingerAdxKlineRefreshSec: number;
   // Basis-arbitrage strategy parameters (spot vs perp)
   basisArbEntryThresholdBps: number;
   basisArbExitThresholdBps: number;
@@ -308,7 +328,14 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
       const raw = env.STRATEGY_TYPE
         ?? (cfg as { strategy?: { type?: string } }).strategy?.type
         ?? "ma-crossover";
-      if (raw === "funding-arb" || raw === "longer-tf" || raw === "ma-crossover" || raw === "basis-arb") return raw;
+      if (
+        raw === "funding-arb"
+        || raw === "longer-tf"
+        || raw === "ma-crossover"
+        || raw === "basis-arb"
+        || raw === "pairs-trading"
+        || raw === "bollinger-adx"
+      ) return raw;
       return "ma-crossover";
     })(),
     basisArbEntryThresholdBps: env.BASIS_ARB_ENTRY_THRESHOLD_BPS
@@ -358,5 +385,55 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     longerTfTakeProfitBps: env.LONGER_TF_TAKE_PROFIT_BPS
       ? Number(env.LONGER_TF_TAKE_PROFIT_BPS)
       : ((cfg as { longerTf?: { takeProfitBps?: number } }).longerTf?.takeProfitBps ?? 150),
+    pairsLeg1Symbol: env.PAIRS_LEG1_SYMBOL
+      ?? ((cfg as { pairs?: { leg1Symbol?: string } }).pairs?.leg1Symbol ?? "BTCUSDT"),
+    pairsLeg2Symbol: env.PAIRS_LEG2_SYMBOL
+      ?? ((cfg as { pairs?: { leg2Symbol?: string } }).pairs?.leg2Symbol ?? "ETHUSDT"),
+    pairsWindowSize: env.PAIRS_WINDOW_SIZE
+      ? Number(env.PAIRS_WINDOW_SIZE)
+      : ((cfg as { pairs?: { windowSize?: number } }).pairs?.windowSize ?? 200),
+    pairsEntryZ: env.PAIRS_ENTRY_Z
+      ? Number(env.PAIRS_ENTRY_Z)
+      : ((cfg as { pairs?: { entryZ?: number } }).pairs?.entryZ ?? 2.0),
+    pairsExitZ: env.PAIRS_EXIT_Z
+      ? Number(env.PAIRS_EXIT_Z)
+      : ((cfg as { pairs?: { exitZ?: number } }).pairs?.exitZ ?? 0.3),
+    pairsMaxHoldMinutes: env.PAIRS_MAX_HOLD_MINUTES
+      ? Number(env.PAIRS_MAX_HOLD_MINUTES)
+      : ((cfg as { pairs?: { maxHoldMinutes?: number } }).pairs?.maxHoldMinutes ?? 480),
+    pairsMaxNotionalUsdPerLeg: env.PAIRS_MAX_NOTIONAL_USD_PER_LEG
+      ? Number(env.PAIRS_MAX_NOTIONAL_USD_PER_LEG)
+      : ((cfg as { pairs?: { maxNotionalUsdPerLeg?: number } }).pairs?.maxNotionalUsdPerLeg ?? 100),
+    pairsKlineInterval: env.PAIRS_KLINE_INTERVAL
+      ?? ((cfg as { pairs?: { klineInterval?: string } }).pairs?.klineInterval ?? "5"),
+    pairsKlineRefreshSec: env.PAIRS_KLINE_REFRESH_SEC
+      ? Number(env.PAIRS_KLINE_REFRESH_SEC)
+      : ((cfg as { pairs?: { klineRefreshSec?: number } }).pairs?.klineRefreshSec ?? 30),
+    bollingerAdxBbPeriod: env.BOLLINGER_ADX_BB_PERIOD
+      ? Number(env.BOLLINGER_ADX_BB_PERIOD)
+      : ((cfg as { bollingerAdx?: { bbPeriod?: number } }).bollingerAdx?.bbPeriod ?? 20),
+    bollingerAdxBbStdDev: env.BOLLINGER_ADX_BB_STDDEV
+      ? Number(env.BOLLINGER_ADX_BB_STDDEV)
+      : ((cfg as { bollingerAdx?: { bbStdDev?: number } }).bollingerAdx?.bbStdDev ?? 2),
+    bollingerAdxAdxPeriod: env.BOLLINGER_ADX_ADX_PERIOD
+      ? Number(env.BOLLINGER_ADX_ADX_PERIOD)
+      : ((cfg as { bollingerAdx?: { adxPeriod?: number } }).bollingerAdx?.adxPeriod ?? 14),
+    bollingerAdxAdxRangingThreshold: env.BOLLINGER_ADX_ADX_RANGING_THRESHOLD
+      ? Number(env.BOLLINGER_ADX_ADX_RANGING_THRESHOLD)
+      : ((cfg as { bollingerAdx?: { adxRangingThreshold?: number } }).bollingerAdx?.adxRangingThreshold ?? 20),
+    bollingerAdxAdxTrendingThreshold: env.BOLLINGER_ADX_ADX_TRENDING_THRESHOLD
+      ? Number(env.BOLLINGER_ADX_ADX_TRENDING_THRESHOLD)
+      : ((cfg as { bollingerAdx?: { adxTrendingThreshold?: number } }).bollingerAdx?.adxTrendingThreshold ?? 25),
+    bollingerAdxStopLossBps: env.BOLLINGER_ADX_STOP_LOSS_BPS
+      ? Number(env.BOLLINGER_ADX_STOP_LOSS_BPS)
+      : ((cfg as { bollingerAdx?: { stopLossBps?: number } }).bollingerAdx?.stopLossBps ?? 80),
+    bollingerAdxTakeProfitBps: env.BOLLINGER_ADX_TAKE_PROFIT_BPS
+      ? Number(env.BOLLINGER_ADX_TAKE_PROFIT_BPS)
+      : ((cfg as { bollingerAdx?: { takeProfitBps?: number } }).bollingerAdx?.takeProfitBps ?? 150),
+    bollingerAdxKlineInterval: env.BOLLINGER_ADX_KLINE_INTERVAL
+      ?? ((cfg as { bollingerAdx?: { klineInterval?: string } }).bollingerAdx?.klineInterval ?? "15"),
+    bollingerAdxKlineRefreshSec: env.BOLLINGER_ADX_KLINE_REFRESH_SEC
+      ? Number(env.BOLLINGER_ADX_KLINE_REFRESH_SEC)
+      : ((cfg as { bollingerAdx?: { klineRefreshSec?: number } }).bollingerAdx?.klineRefreshSec ?? 60),
   };
 }

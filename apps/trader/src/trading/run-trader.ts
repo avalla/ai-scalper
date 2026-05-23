@@ -65,6 +65,16 @@ import {
   computeBasisBps,
   type BasisPosition,
 } from "../strategies/basis-arb";
+import {
+  pairsDecide,
+  type PairsCache,
+  type PairsPosition,
+} from "../strategies/pairs-trading";
+import {
+  bollingerAdxDecide,
+  type BollingerAdxKlineCache,
+  type BollingerAdxPosition,
+} from "../strategies/bollinger-adx";
 
 function toNumber(value: string): number {
   const parsed = Number(value);
@@ -636,9 +646,12 @@ function buildClosedPositionLedgerEntry(params: {
   symbol: string;
   feeRoundTripBps: number;
   championIdAtEntry?: string | null;
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx";
   basisEntryBps?: number;
   basisExitBps?: number;
+  pairsLeg2Symbol?: string;
+  pairsEntryZ?: number;
+  pairsExitZ?: number;
 }): ClosedPositionLedgerEntry {
   const netPnl = params.nextState.realizedPnlUsd - params.previousState.realizedPnlUsd;
   const feeUsd = params.feeRoundTripBps > 0
@@ -662,6 +675,9 @@ function buildClosedPositionLedgerEntry(params: {
     strategyType: params.strategyType,
     basisEntryBps: params.basisEntryBps,
     basisExitBps: params.basisExitBps,
+    pairsLeg2Symbol: params.pairsLeg2Symbol,
+    pairsEntryZ: params.pairsEntryZ,
+    pairsExitZ: params.pairsExitZ,
     side: params.previousPosition.side,
     stopLossPrice: params.previousPosition.stopLossPrice,
     symbol: params.symbol,
@@ -1470,6 +1486,686 @@ async function runBasisArbTick(params: {
   return { shouldContinueLoop: true };
 }
 
+/**
+ * Pairs-trading tick: two-leg cointegration mean reversion on two linear-perp
+ * symbols (e.g. BTCUSDT / ETHUSDT).
+ *
+ * Safety invariant matches basis-arb: if leg1 fills and leg2 fails, we
+ * IMMEDIATELY submit a compensating reduceOnly close on leg1. If compensation
+ * itself fails, we emit a CRITICAL alert and do NOT record the position in
+ * state (manual reconcile required).
+ */
+async function runPairsTradingTick(params: {
+  alerter: WebhookAlerter;
+  client: ReturnType<typeof createBybitClient>;
+  config: TraderConfig;
+  getInstrument: (symbol: string) => Promise<InstrumentInfo>;
+  observedAt: string;
+  pairsCacheRef: MutableRef<PairsCache | null>;
+  pairsPositionRef: MutableRef<PairsPosition | null>;
+  positionLedger: ReturnType<typeof createPositionLedger>;
+  stateRef: MutableRef<TraderState>;
+  openPositionSymbolRef: MutableRef<string | null>;
+  toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
+}): Promise<{ shouldContinueLoop: boolean }> {
+  const { config, client, stateRef, openPositionSymbolRef, pairsPositionRef, pairsCacheRef } = params;
+  const leg1Symbol = config.pairsLeg1Symbol;
+  const leg2Symbol = config.pairsLeg2Symbol;
+
+  // ── Refresh kline cache if stale or absent ───────────────────────────────
+  const existingCache = pairsCacheRef.get();
+  const cacheStale =
+    existingCache === null
+    || existingCache.leg1Symbol !== leg1Symbol
+    || existingCache.leg2Symbol !== leg2Symbol
+    || (Date.now() - existingCache.fetchedAt) >= config.pairsKlineRefreshSec * 1000;
+  if (cacheStale) {
+    try {
+      const limit = config.pairsWindowSize + 10;
+      const [leg1Klines, leg2Klines] = await Promise.all([
+        client.getKlines({
+          category: "linear",
+          symbol: leg1Symbol,
+          interval: config.pairsKlineInterval,
+          limit,
+        }),
+        client.getKlines({
+          category: "linear",
+          symbol: leg2Symbol,
+          interval: config.pairsKlineInterval,
+          limit,
+        }),
+      ]);
+      // Bybit returns newest-first; reverse to oldest-first and align lengths.
+      const leg1Closes = leg1Klines.map((k) => Number(k.closePrice)).reverse();
+      const leg2Closes = leg2Klines.map((k) => Number(k.closePrice)).reverse();
+      const aligned = Math.min(leg1Closes.length, leg2Closes.length);
+      pairsCacheRef.set({
+        leg1Symbol,
+        leg2Symbol,
+        fetchedAt: Date.now(),
+        leg1Closes: leg1Closes.slice(leg1Closes.length - aligned),
+        leg2Closes: leg2Closes.slice(leg2Closes.length - aligned),
+      });
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        strategyType: "pairs-trading",
+        event: "klines-fetch-failed",
+        leg1Symbol,
+        leg2Symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      return { shouldContinueLoop: true };
+    }
+  }
+
+  // ── Per-leg instruments + current prices ─────────────────────────────────
+  let leg1Instrument: InstrumentInfo;
+  let leg2Instrument: InstrumentInfo;
+  try {
+    leg1Instrument = await params.getInstrument(leg1Symbol);
+    leg2Instrument = await params.getInstrument(leg2Symbol);
+  } catch (err) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "pairs-trading",
+      event: "instrument-unavailable",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  let leg1Ticker;
+  let leg2Ticker;
+  try {
+    leg1Ticker = await client.getTicker({ category: "linear", symbol: leg1Symbol });
+    leg2Ticker = await client.getTicker({ category: "linear", symbol: leg2Symbol });
+  } catch (err) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "pairs-trading",
+      event: "ticker-unavailable",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return { shouldContinueLoop: true };
+  }
+  const leg1Price = Number(leg1Ticker.lastPrice);
+  const leg2Price = Number(leg2Ticker.lastPrice);
+  if (!Number.isFinite(leg1Price) || leg1Price <= 0 || !Number.isFinite(leg2Price) || leg2Price <= 0) {
+    return { shouldContinueLoop: true };
+  }
+
+  const decision = pairsDecide({
+    cache: pairsCacheRef.get(),
+    position: pairsPositionRef.get(),
+    now: Date.now(),
+    refreshSec: config.pairsKlineRefreshSec,
+    windowSize: config.pairsWindowSize,
+    entryZ: config.pairsEntryZ,
+    exitZ: config.pairsExitZ,
+    maxHoldMinutes: config.pairsMaxHoldMinutes,
+    leg1Symbol,
+    leg2Symbol,
+  });
+
+  if (decision.kind === "hold") {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      event: "tick-pairs-trading",
+      leg1Symbol,
+      leg2Symbol,
+      leg1Price,
+      leg2Price,
+      decision: "hold",
+      reason: decision.reason,
+      z: decision.z,
+      position: pairsPositionRef.get(),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // ── ENTRY ────────────────────────────────────────────────────────────────
+  if (decision.kind === "enter") {
+    const notionalPerLeg = config.pairsMaxNotionalUsdPerLeg;
+    const leg1QtyStep = Number(leg1Instrument.lotSizeFilter.qtyStep);
+    const leg2QtyStep = Number(leg2Instrument.lotSizeFilter.qtyStep);
+    const leg1MinQty = Number(leg1Instrument.lotSizeFilter.minOrderQty);
+    const leg2MinQty = Number(leg2Instrument.lotSizeFilter.minOrderQty);
+
+    const leg1QtyRaw = notionalPerLeg / leg1Price;
+    const leg2QtyRaw = notionalPerLeg / leg2Price;
+    const leg1Qty = Math.floor(leg1QtyRaw / leg1QtyStep) * leg1QtyStep;
+    const leg2Qty = Math.floor(leg2QtyRaw / leg2QtyStep) * leg2QtyStep;
+    if (leg1Qty < leg1MinQty || leg2Qty < leg2MinQty) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        strategyType: "pairs-trading",
+        event: "qty-below-min",
+        leg1Qty,
+        leg2Qty,
+        leg1MinQty,
+        leg2MinQty,
+      }));
+      return { shouldContinueLoop: true };
+    }
+    const leg1QtyStr = leg1Qty.toFixed(countDecimals(leg1Instrument.lotSizeFilter.qtyStep));
+    const leg2QtyStr = leg2Qty.toFixed(countDecimals(leg2Instrument.lotSizeFilter.qtyStep));
+    const leg1OrderSide: "Buy" | "Sell" = decision.leg1Side === "long" ? "Buy" : "Sell";
+    const leg2OrderSide: "Buy" | "Sell" = decision.leg2Side === "long" ? "Buy" : "Sell";
+
+    if (config.paperTrading) {
+      const now = Date.now();
+      pairsPositionRef.set({
+        leg1Symbol,
+        leg1Side: decision.leg1Side,
+        leg1EntryPrice: leg1Price,
+        leg1Qty,
+        leg2Symbol,
+        leg2Side: decision.leg2Side,
+        leg2EntryPrice: leg2Price,
+        leg2Qty,
+        entryZ: decision.z,
+        hedgeRatio: decision.hedgeRatio,
+        entryAt: now,
+      });
+      openPositionSymbolRef.set(leg1Symbol);
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "pairs-trading-enter-paper",
+        leg1Symbol,
+        leg2Symbol,
+        leg1Side: decision.leg1Side,
+        leg2Side: decision.leg2Side,
+        leg1Qty: leg1QtyStr,
+        leg2Qty: leg2QtyStr,
+        leg1Price,
+        leg2Price,
+        z: decision.z,
+        hedgeRatio: decision.hedgeRatio,
+      }));
+      return { shouldContinueLoop: true };
+    }
+
+    // LIVE: order leg1 first, then leg2; compensate leg1 reduceOnly if leg2 fails.
+    const leg1Req: CreateOrderRequest = {
+      category: "linear",
+      symbol: leg1Symbol,
+      side: leg1OrderSide,
+      qty: leg1QtyStr,
+      orderType: "Market",
+    };
+    let leg1OrderId: string | undefined;
+    try {
+      const resp = await client.createOrder(leg1Req);
+      leg1OrderId = resp.orderId;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "pairs-trading-leg1-failed",
+        leg1Symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      await params.alerter.send(
+        `pairs-trading leg1 failed (no exposure): ${leg1Symbol} ${leg1OrderSide} qty=${leg1QtyStr}`,
+      ).catch(() => {});
+      return { shouldContinueLoop: true };
+    }
+
+    const leg2Req: CreateOrderRequest = {
+      category: "linear",
+      symbol: leg2Symbol,
+      side: leg2OrderSide,
+      qty: leg2QtyStr,
+      orderType: "Market",
+    };
+    try {
+      await client.createOrder(leg2Req);
+    } catch (err) {
+      // Leg2 failed → CLOSE LEG1 IMMEDIATELY (naked-exposure guard).
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "pairs-trading-leg2-failed-closing-leg1",
+        leg1Symbol,
+        leg2Symbol,
+        leg1OrderId,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      const compensateSide: "Buy" | "Sell" = leg1OrderSide === "Buy" ? "Sell" : "Buy";
+      try {
+        await client.createOrder({
+          category: "linear",
+          symbol: leg1Symbol,
+          side: compensateSide,
+          qty: leg1QtyStr,
+          orderType: "Market",
+          reduceOnly: true,
+        });
+        await params.alerter.send(
+          `pairs-trading: leg2 failed, leg1 compensated — closed ${leg1Symbol} qty=${leg1QtyStr}`,
+        ).catch(() => {});
+      } catch (compErr) {
+        await params.alerter.send(
+          `CRITICAL: pairs-trading naked exposure — manual reconcile: ${leg1Symbol} orderId=${leg1OrderId} qty=${leg1QtyStr} compensateErr=${
+            compErr instanceof Error ? compErr.message : String(compErr)
+          }`,
+        ).catch(() => {});
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "pairs-trading-naked-exposure",
+          leg1Symbol,
+          leg1OrderId,
+          qty: leg1QtyStr,
+        }));
+      }
+      return { shouldContinueLoop: true };
+    }
+
+    // Both legs filled.
+    const now = Date.now();
+    pairsPositionRef.set({
+      leg1Symbol,
+      leg1Side: decision.leg1Side,
+      leg1EntryPrice: leg1Price,
+      leg1Qty,
+      leg2Symbol,
+      leg2Side: decision.leg2Side,
+      leg2EntryPrice: leg2Price,
+      leg2Qty,
+      entryZ: decision.z,
+      hedgeRatio: decision.hedgeRatio,
+      entryAt: now,
+    });
+    openPositionSymbolRef.set(leg1Symbol);
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      event: "pairs-trading-enter-live",
+      leg1Symbol,
+      leg2Symbol,
+      leg1Side: decision.leg1Side,
+      leg2Side: decision.leg2Side,
+      leg1Qty: leg1QtyStr,
+      leg2Qty: leg2QtyStr,
+      z: decision.z,
+      hedgeRatio: decision.hedgeRatio,
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  // ── EXIT ─────────────────────────────────────────────────────────────────
+  const pos = pairsPositionRef.get();
+  if (!pos) return { shouldContinueLoop: true };
+
+  const leg1QtyStr = pos.leg1Qty.toFixed(countDecimals(leg1Instrument.lotSizeFilter.qtyStep));
+  const leg2QtyStr = pos.leg2Qty.toFixed(countDecimals(leg2Instrument.lotSizeFilter.qtyStep));
+
+  // Per-leg PnL: long profits on rise; short profits on fall.
+  const leg1Pnl = (pos.leg1Side === "long" ? leg1Price - pos.leg1EntryPrice : pos.leg1EntryPrice - leg1Price) * pos.leg1Qty;
+  const leg2Pnl = (pos.leg2Side === "long" ? leg2Price - pos.leg2EntryPrice : pos.leg2EntryPrice - leg2Price) * pos.leg2Qty;
+  const leg1Notional = pos.leg1Qty * pos.leg1EntryPrice;
+  const leg2Notional = pos.leg2Qty * pos.leg2EntryPrice;
+  const feeRoundTripBps = config.feeRoundTripBps;
+  const leg1Fee = leg1Notional * (feeRoundTripBps / 10_000);
+  const leg2Fee = leg2Notional * (feeRoundTripBps / 10_000);
+  const netPnl = leg1Pnl + leg2Pnl - leg1Fee - leg2Fee;
+
+  if (!config.paperTrading) {
+    const leg1CloseSide: "Buy" | "Sell" = pos.leg1Side === "long" ? "Sell" : "Buy";
+    const leg2CloseSide: "Buy" | "Sell" = pos.leg2Side === "long" ? "Sell" : "Buy";
+    let leg1Closed = false;
+    let leg2Closed = false;
+    try {
+      await client.createOrder({
+        category: "linear",
+        symbol: pos.leg1Symbol,
+        side: leg1CloseSide,
+        qty: leg1QtyStr,
+        orderType: "Market",
+        reduceOnly: true,
+      });
+      leg1Closed = true;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "pairs-trading-leg1-exit-failed",
+        leg1Symbol: pos.leg1Symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    try {
+      await client.createOrder({
+        category: "linear",
+        symbol: pos.leg2Symbol,
+        side: leg2CloseSide,
+        qty: leg2QtyStr,
+        orderType: "Market",
+        reduceOnly: true,
+      });
+      leg2Closed = true;
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        event: "pairs-trading-leg2-exit-failed",
+        leg2Symbol: pos.leg2Symbol,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    if (!leg1Closed || !leg2Closed) {
+      await params.alerter.send(
+        `pairs-trading exit incomplete — manual reconcile: leg1Closed=${leg1Closed} leg2Closed=${leg2Closed}`,
+      ).catch(() => {});
+    }
+  }
+
+  // Compute current z using the FROZEN entry hedge ratio for ledger transparency.
+  let currentZ = decision.currentZ;
+  const cache = pairsCacheRef.get();
+  if (cache && cache.leg1Closes.length > 0 && cache.leg1Closes.length === cache.leg2Closes.length) {
+    // Already supplied by decision; nothing more to compute.
+    currentZ = decision.currentZ;
+  }
+
+  const previousState = stateRef.get();
+  const nextState: TraderState = {
+    ...previousState,
+    realizedPnlUsd: previousState.realizedPnlUsd + netPnl,
+    lastTradeAt: Date.now(),
+    position: null,
+  };
+  stateRef.set(nextState);
+  pairsPositionRef.set(null);
+  openPositionSymbolRef.set(null);
+
+  const ledgerEntry: ClosedPositionLedgerEntry = {
+    closedAt: new Date().toISOString(),
+    cumulativeRealizedPnlUsd: nextState.realizedPnlUsd,
+    entryPrice: pos.leg1EntryPrice,
+    exitPrice: leg1Price,
+    exitReason: decision.reason,
+    leverage: 1,
+    notionalUsd: leg1Notional + leg2Notional,
+    openedAt: new Date(pos.entryAt).toISOString(),
+    quantity: pos.leg1Qty,
+    realizedPnlUsd: netPnl,
+    grossPnlUsd: leg1Pnl + leg2Pnl,
+    feeUsd: leg1Fee + leg2Fee,
+    championIdAtEntry: null,
+    strategyType: "pairs-trading",
+    pairsLeg2Symbol: pos.leg2Symbol,
+    pairsEntryZ: pos.entryZ,
+    pairsExitZ: currentZ,
+    side: pos.leg1Side,
+    stopLossPrice: 0,
+    symbol: pos.leg1Symbol,
+    takeProfitPrice: 0,
+  };
+  await params.positionLedger.appendClosedPosition(ledgerEntry);
+  await params.positionLedger.syncSnapshot(params.toPersistedTraderSnapshot({
+    openPositionSymbol: null,
+    state: nextState,
+  }));
+
+  console.log(JSON.stringify({
+    ts: params.observedAt,
+    event: "pairs-trading-exit",
+    leg1Symbol: pos.leg1Symbol,
+    leg2Symbol: pos.leg2Symbol,
+    reason: decision.reason,
+    entryZ: pos.entryZ,
+    exitZ: currentZ,
+    leg1Pnl,
+    leg2Pnl,
+    feeUsd: leg1Fee + leg2Fee,
+    netPnl,
+  }));
+
+  return { shouldContinueLoop: true };
+}
+
+/**
+ * Bollinger + ADX regime-filter tick — single-leg, single-symbol, kline-cache
+ * driven. Uses standard risk gates (cooldown, daily-loss, position-limit) via
+ * the shared `evaluateRisk`. Bandit / scan-gate are not applied.
+ */
+async function runBollingerAdxTick(params: {
+  alerter: WebhookAlerter;
+  buildClosedPositionLedgerEntry: typeof buildClosedPositionLedgerEntry;
+  client: ReturnType<typeof createBybitClient>;
+  config: TraderConfig;
+  getInstrument: (symbol: string) => Promise<InstrumentInfo>;
+  klineCacheRef: MutableRef<BollingerAdxKlineCache | null>;
+  observedAt: string;
+  openPositionSymbolRef: MutableRef<string | null>;
+  positionLedger: ReturnType<typeof createPositionLedger>;
+  stateRef: MutableRef<TraderState>;
+  toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
+}): Promise<{ shouldContinueLoop: boolean }> {
+  const { config, client, stateRef, openPositionSymbolRef, klineCacheRef } = params;
+  const activeSymbol = config.tradeCandidateSymbols[0] ?? config.symbol;
+
+  let instrument: InstrumentInfo;
+  try {
+    instrument = await params.getInstrument(activeSymbol);
+  } catch (err) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "bollinger-adx",
+      symbol: activeSymbol,
+      event: "instrument-unavailable",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return { shouldContinueLoop: true };
+  }
+
+  let ticker;
+  try {
+    ticker = await client.getTicker({ category: config.category, symbol: activeSymbol });
+  } catch (err) {
+    console.log(JSON.stringify({
+      ts: params.observedAt,
+      strategyType: "bollinger-adx",
+      symbol: activeSymbol,
+      event: "ticker-unavailable",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return { shouldContinueLoop: true };
+  }
+  const lastPrice = Number(ticker.lastPrice);
+  const markPrice = Number(ticker.markPrice);
+  const bid = Number(ticker.bid1Price);
+  const ask = Number(ticker.ask1Price);
+  const mid = (bid + ask) / 2;
+  const spreadBps = mid > 0 ? ((ask - bid) / mid) * 10_000 : 0;
+
+  // Refresh kline cache (highs/lows/closes) when stale.
+  const existing = klineCacheRef.get();
+  const cacheStale =
+    existing === null
+    || existing.symbol !== activeSymbol
+    || (Date.now() - existing.fetchedAt) >= config.bollingerAdxKlineRefreshSec * 1000;
+  if (cacheStale) {
+    try {
+      const limit = Math.max(config.bollingerAdxBbPeriod, config.bollingerAdxAdxPeriod * 2 + 5) + 5;
+      const klines = await client.getKlines({
+        category: config.category,
+        symbol: activeSymbol,
+        interval: config.bollingerAdxKlineInterval,
+        limit,
+      });
+      const highs = klines.map((k) => Number(k.highPrice)).reverse();
+      const lows = klines.map((k) => Number(k.lowPrice)).reverse();
+      const closes = klines.map((k) => Number(k.closePrice)).reverse();
+      klineCacheRef.set({ symbol: activeSymbol, fetchedAt: Date.now(), highs, lows, closes });
+    } catch (err) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        strategyType: "bollinger-adx",
+        symbol: activeSymbol,
+        event: "klines-fetch-failed",
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      return { shouldContinueLoop: true };
+    }
+  }
+
+  const state = stateRef.get();
+  const hasPos = state.position !== null && openPositionSymbolRef.get() === activeSymbol;
+  const adxPosition: BollingerAdxPosition | null = hasPos && state.position
+    ? { side: state.position.side, entryPrice: state.position.entryPrice }
+    : null;
+
+  const decision = bollingerAdxDecide({
+    klineCache: klineCacheRef.get(),
+    position: adxPosition,
+    symbol: activeSymbol,
+    currentPrice: lastPrice,
+    now: Date.now(),
+    refreshSec: config.bollingerAdxKlineRefreshSec,
+    bbPeriod: config.bollingerAdxBbPeriod,
+    bbStdDev: config.bollingerAdxBbStdDev,
+    adxPeriod: config.bollingerAdxAdxPeriod,
+    adxRangingThreshold: config.bollingerAdxAdxRangingThreshold,
+    adxTrendingThreshold: config.bollingerAdxAdxTrendingThreshold,
+    stopLossBps: config.bollingerAdxStopLossBps,
+    takeProfitBps: config.bollingerAdxTakeProfitBps,
+  });
+
+  // ── EXIT ────────────────────────────────────────────────────────────────
+  if (decision.kind === "exit" && state.position && hasPos) {
+    const closeAction: "long" | "short" = state.position.side === "long" ? "short" : "long";
+    const closeQty = state.position.quantity.toFixed(countDecimals(instrument.lotSizeFilter.qtyStep));
+    const exec = await executeTrade({
+      action: closeAction,
+      client,
+      config,
+      instrument,
+      lastPrice,
+      symbol: activeSymbol,
+      tickerBidPrice: ticker.bid1Price,
+      tickerAskPrice: ticker.ask1Price,
+      qty: closeQty,
+      reduceOnly: true,
+    });
+    if (exec.filled) {
+      const previousState = state;
+      const previousPosition = state.position;
+      const newState = updatePaperState({
+        action: closeAction,
+        leverage: state.position.leverage,
+        notionalUsd: state.position.notionalUsd,
+        price: exec.fillPrice,
+        previous: state,
+        now: Date.now(),
+        stopLossBps: config.bollingerAdxStopLossBps,
+        takeProfitBps: config.bollingerAdxTakeProfitBps,
+        reduceOnly: true,
+        feeRoundTripBps: config.feeRoundTripBps,
+      });
+      stateRef.set(newState);
+      openPositionSymbolRef.set(null);
+      await params.positionLedger.appendClosedPosition(params.buildClosedPositionLedgerEntry({
+        exitPrice: exec.fillPrice,
+        exitReason: `bollinger-adx:${decision.reason}`,
+        nextState: newState,
+        previousState,
+        previousPosition,
+        symbol: activeSymbol,
+        feeRoundTripBps: config.feeRoundTripBps,
+        championIdAtEntry: null,
+        strategyType: "bollinger-adx",
+      }));
+      await params.positionLedger.syncSnapshot(params.toPersistedTraderSnapshot({
+        openPositionSymbol: null,
+        state: newState,
+      }));
+    }
+  }
+
+  // ── ENTRY ───────────────────────────────────────────────────────────────
+  if (decision.kind === "enter" && !state.position) {
+    const notionalUsd = config.orderUsd * config.leverage;
+    const risk = evaluateRisk({
+      action: decision.side,
+      limits: {
+        maxPositionUsd: config.maxPositionUsd,
+        maxDailyLossUsd: config.maxDailyLossUsd,
+        minTradeIntervalMs: config.minTradeIntervalMs,
+        maxSpreadBps: config.maxSpreadBps,
+      },
+      market: { lastPrice, markPrice },
+      now: Date.now(),
+      orderUsd: notionalUsd,
+      state,
+    });
+    if (!risk.allowed) {
+      console.log(JSON.stringify({
+        ts: params.observedAt,
+        strategyType: "bollinger-adx",
+        symbol: activeSymbol,
+        event: "entry-blocked-by-risk",
+        reason: risk.reason,
+        spreadBps,
+      }));
+      return { shouldContinueLoop: true };
+    }
+    const minLeverage = Number(instrument.leverageFilter.minLeverage);
+    const maxLeverage = Number(instrument.leverageFilter.maxLeverage);
+    const clampedLeverage = Math.min(Math.max(config.leverage, minLeverage), maxLeverage);
+    const qtyStep = Number(instrument.lotSizeFilter.qtyStep);
+    const rawQty = notionalUsd / lastPrice;
+    const normalizedQty = Math.floor(rawQty / qtyStep) * qtyStep;
+    const minQty = Number(instrument.lotSizeFilter.minOrderQty);
+    if (normalizedQty < minQty) {
+      return { shouldContinueLoop: true };
+    }
+    const qty = normalizedQty.toFixed(countDecimals(instrument.lotSizeFilter.qtyStep));
+    const exec = await executeTrade({
+      action: decision.side,
+      client,
+      config,
+      instrument,
+      lastPrice,
+      symbol: activeSymbol,
+      tickerBidPrice: ticker.bid1Price,
+      tickerAskPrice: ticker.ask1Price,
+      qty,
+    });
+    if (exec.filled) {
+      const newState = updatePaperState({
+        action: decision.side,
+        leverage: clampedLeverage,
+        notionalUsd,
+        price: exec.fillPrice,
+        previous: state,
+        now: Date.now(),
+        stopLossBps: config.bollingerAdxStopLossBps,
+        takeProfitBps: config.bollingerAdxTakeProfitBps,
+      });
+      stateRef.set(newState);
+      openPositionSymbolRef.set(activeSymbol);
+      await params.positionLedger.syncSnapshot(params.toPersistedTraderSnapshot({
+        openPositionSymbol: activeSymbol,
+        state: newState,
+      }));
+    }
+  }
+
+  console.log(JSON.stringify({
+    ts: params.observedAt,
+    event: "tick-bollinger-adx",
+    symbol: activeSymbol,
+    lastPrice,
+    spreadBps,
+    decision: decision.kind,
+    reason: decision.kind === "hold" || decision.kind === "enter" ? decision.reason : `exit:${decision.reason}`,
+    regime: decision.kind === "exit" ? undefined : decision.regime,
+    position: stateRef.get().position,
+    realizedPnlUsd: stateRef.get().realizedPnlUsd,
+  }));
+
+  return { shouldContinueLoop: true };
+}
+
 export async function runTrader(config: TraderConfig): Promise<void> {
   await mkdir(resolveProjectPath("apps/trader/data/runtime"), { recursive: true });
   acquireSessionLock();
@@ -1644,6 +2340,11 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     let basisArbEntrySpotPrice: number | null = null;
     let basisArbEntryQty: number | null = null;
     let basisArbFundingRateAtEntry: number | null = null;
+    // pairs-trading state
+    let pairsCache: PairsCache | null = null;
+    let pairsPosition: PairsPosition | null = null;
+    // bollinger-adx state
+    let bollingerAdxKlineCache: BollingerAdxKlineCache | null = null;
     let cachedRankedSetups: RankedTradeSetup[] = [];
     let lastScanAt = 0;
     let lastScanGeneratedAt: string | null = null;
@@ -1713,6 +2414,75 @@ export async function runTrader(config: TraderConfig): Promise<void> {
           openPositionSymbolRef: {
             get: () => openPositionSymbol,
             set: (v) => { openPositionSymbol = v; },
+          },
+          toPersistedTraderSnapshot: (p) => toPersistedTraderSnapshot(p),
+        });
+        ticks += 1;
+        if (!handled.shouldContinueLoop) break;
+        if (config.pollMs > 0) await sleep(config.pollMs);
+        continue;
+      }
+      if (config.strategyType === "pairs-trading") {
+        const handled = await runPairsTradingTick({
+          alerter,
+          client,
+          config,
+          getInstrument: (symbol) => getInstrument({
+            cache: instrumentCache,
+            category: "linear",
+            client,
+            symbol,
+          }),
+          observedAt,
+          pairsCacheRef: {
+            get: () => pairsCache,
+            set: (v) => { pairsCache = v; },
+          },
+          pairsPositionRef: {
+            get: () => pairsPosition,
+            set: (v) => { pairsPosition = v; },
+          },
+          positionLedger,
+          stateRef: {
+            get: () => state,
+            set: (v) => { state = v; },
+          },
+          openPositionSymbolRef: {
+            get: () => openPositionSymbol,
+            set: (v) => { openPositionSymbol = v; },
+          },
+          toPersistedTraderSnapshot: (p) => toPersistedTraderSnapshot(p),
+        });
+        ticks += 1;
+        if (!handled.shouldContinueLoop) break;
+        if (config.pollMs > 0) await sleep(config.pollMs);
+        continue;
+      }
+      if (config.strategyType === "bollinger-adx") {
+        const handled = await runBollingerAdxTick({
+          alerter,
+          buildClosedPositionLedgerEntry,
+          client,
+          config,
+          getInstrument: (symbol) => getInstrument({
+            cache: instrumentCache,
+            category: config.category,
+            client,
+            symbol,
+          }),
+          klineCacheRef: {
+            get: () => bollingerAdxKlineCache,
+            set: (v) => { bollingerAdxKlineCache = v; },
+          },
+          observedAt,
+          openPositionSymbolRef: {
+            get: () => openPositionSymbol,
+            set: (v) => { openPositionSymbol = v; },
+          },
+          positionLedger,
+          stateRef: {
+            get: () => state,
+            set: (v) => { state = v; },
           },
           toPersistedTraderSnapshot: (p) => toPersistedTraderSnapshot(p),
         });
