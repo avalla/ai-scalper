@@ -22,7 +22,7 @@ async function main(): Promise<void> {
 
   const reader = stdout.getReader();
   const decoder = new TextDecoder();
-  let readyCount = 0;
+  let workersReady = false;
   let sessionEnqueued = false;
 
   while (true) {
@@ -34,12 +34,11 @@ async function main(): Promise<void> {
     const chunk = decoder.decode(value, { stream: true });
     process.stdout.write(chunk);
 
-    const matches = chunk.match(/"status": "ready"/g);
-    if (matches) {
-      readyCount += matches.length;
+    if (!workersReady && chunk.includes('"event":"workers-ready"')) {
+      workersReady = true;
     }
 
-    if (!sessionEnqueued && readyCount >= 3) {
+    if (!sessionEnqueued && workersReady) {
       sessionEnqueued = true;
       const enqueueProcess = Bun.spawn({
         cmd: ["bun", "src/enqueue-trader-session.ts"],
