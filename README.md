@@ -132,6 +132,14 @@ Exceptional leverage path:
 - keeps base leverage by default
 - promotes to `EXCEPTIONAL_LEVERAGE` only if spread, funding, hourly move, minute range, and net edge all pass strict gates
 
+## Meta-bandit (Thompson sampling)
+
+Optional online variant selection over a pool of strategy presets:
+- enable with `META_ENABLED=true` — shadow-trades each variant every tick and routes live entries to the champion
+- `META_WARMUP_MIN_TRADES`/`META_PNL_WINDOW_SIZE` tune the ranking warmup and FIFO PnL window
+- `META_INCLUDE_AGGRESSIVE_VARIANTS=true` appends 25x/50x/75x/100x variants to the pool
+- allocator state persists to `apps/trader/data/runtime/variants.json` every `RUNTIME_ARTIFACT_FLUSH_TICKS`
+
 ## Scan tradable pairs
 
 ```bash
