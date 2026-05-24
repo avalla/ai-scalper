@@ -20,6 +20,22 @@ function buildQueues() {
     // are open (queues are auto-created the first time we read them).
     new Queue(QUEUE_NAMES.llmManagedOpenDecision, { connection }),
     new Queue(QUEUE_NAMES.llmManagedTradeManagement, { connection }),
+    // Phase 2 — per-strategy queues. Read-only so the operator can monitor
+    // live trades for any strategy via Bull Board.
+    new Queue(QUEUE_NAMES.fundingArbOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.fundingArbTradeManagement, { connection }),
+    new Queue(QUEUE_NAMES.longerTfOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.longerTfTradeManagement, { connection }),
+    new Queue(QUEUE_NAMES.bollingerAdxOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.bollingerAdxTradeManagement, { connection }),
+    new Queue(QUEUE_NAMES.basisArbOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.basisArbTradeManagement, { connection }),
+    new Queue(QUEUE_NAMES.pairsTradingOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.pairsTradingTradeManagement, { connection }),
+    new Queue(QUEUE_NAMES.calendarSpreadOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.calendarSpreadTradeManagement, { connection }),
+    new Queue(QUEUE_NAMES.maCrossoverOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.maCrossoverTradeManagement, { connection }),
   ];
 }
 

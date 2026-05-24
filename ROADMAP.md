@@ -52,23 +52,84 @@ Benefits:
   `runLlmManagedTick` loop becomes a no-op (the trader subprocess just
   idles until the session job exits — trades are owned by the workers).
 
-### Phase 2 (deferred)
+### Phase 2 — ✅ shipped (behind per-strategy flags, default OFF)
 
-Migrate the remaining 7 strategies (ma-crossover, funding-arb, longer-tf,
-basis-arb, pairs-trading, bollinger-adx, calendar-spread) to the same
-pattern:
+All 7 remaining strategies now have a BullMQ trade-as-job pipeline that
+mirrors the Phase 1 llm-managed PoC: one recurring `open-decision` job and
+one `trade-management` job per live position, each completing when the
+position closes (tp / sl / convergence / external-close).
 
-- Per-strategy `open-decision` + `trade-management` queue pair (or a
-  single shared "strategy-tick" queue with discriminator in the job data).
-- Generic `StrategyManageJobData<TStrategy>` envelope.
-- Strategy-specific processors all sharing the same close-completes-job
-  semantics.
-- Keep the bandit/meta layer (`ma-crossover`) intact — it operates on
-  closed-position outcomes, which the new design preserves via
-  `position-ledger.appendClosedPosition`.
+Per-strategy flag → enable the BullMQ stack (legacy in-process loop becomes
+a no-op when the flag is true; behavior is byte-identical when false):
 
-Phase 2 is NOT scheduled until we have ≥1 week of live runs on the
-Phase 1 stack and confirm no regression vs. the in-process baseline.
+| Strategy | Config flag | Env var | Queues |
+|---|---|---|---|
+| funding-arb | `fundingArb.useBullmqJobs` | `FUNDING_ARB_USE_BULLMQ_JOBS` | `funding-arb:open-decision` + `funding-arb:trade-management` |
+| longer-tf | `longerTf.useBullmqJobs` | `LONGER_TF_USE_BULLMQ_JOBS` | `longer-tf:open-decision` + `longer-tf:trade-management` |
+| bollinger-adx | `bollingerAdx.useBullmqJobs` | `BOLLINGER_ADX_USE_BULLMQ_JOBS` | `bollinger-adx:open-decision` + `bollinger-adx:trade-management` |
+| basis-arb | `basisArb.useBullmqJobs` | `BASIS_ARB_USE_BULLMQ_JOBS` | `basis-arb:open-decision` + `basis-arb:trade-management` |
+| pairs-trading | `pairs.useBullmqJobs` | `PAIRS_TRADING_USE_BULLMQ_JOBS` | `pairs-trading:open-decision` + `pairs-trading:trade-management` |
+| calendar-spread | `calendarSpread.useBullmqJobs` | `CALENDAR_SPREAD_USE_BULLMQ_JOBS` | `calendar-spread:open-decision` + `calendar-spread:trade-management` |
+| ma-crossover | `maCrossover.useBullmqJobs` | `MA_CROSSOVER_USE_BULLMQ_JOBS` | `ma-crossover:open-decision` + `ma-crossover:trade-management` |
+
+Shared Phase 2 infrastructure:
+
+- `apps/trader/src/strategies/shared/bullmq-shared-state.ts` — generic
+  `createStrategySharedState({ strategy, redis, manageQueue })` that
+  namespaces cooldown/last-trade-at Redis keys per strategy. The Phase 1
+  `createLlmManagedSharedState` is now a thin wrapper over this factory
+  and preserves its original `ai-scalper:llm-managed:last-cut-loss-at`
+  key for backward compat.
+- `apps/trader/src/strategies/shared/trade-job-helpers.ts` —
+  `makePositionId`, `makeOpenTickJobId`, `appendDecisionHistory`,
+  `floorQtyToStep`, `computeQtyFromNotional`, `safeRemoveRepeatable`.
+- `apps/trader/src/strategies/shared/allocator-redis.ts` — Redis-backed
+  `AllocatorStore` used by the ma-crossover bandit so allocator state
+  survives bot restarts (legacy filesystem `persistAllocatorState`
+  remains the canonical path while the flag is false).
+
+Two-leg semantics (basis-arb, pairs-trading, calendar-spread):
+
+- Position state on the manage job carries BOTH legs (entry prices, qtys,
+  sides). Manage reconciles both legs; close emits reduce-only on both
+  legs sequentially.
+- If leg2 placement fails on `open` → leg1 is compensated reduce-only and
+  NO manage job is enqueued (no exposure tracked).
+- If leg2 close fails on `manage` → job stays alive with a
+  `close-attempt-failed` decision-history entry; next tick retries.
+
+ma-crossover specifics (the trickiest of the 7):
+
+- Open-processor calls the existing pure `selectChampion` against the
+  Redis-loaded `AllocatorState`, persists the advanced round-robin
+  cursor, and tags the manage job with both `championIdAtEntry` AND a
+  snapshot of the champion's params (so SL/TP at exit always matches
+  what was active at entry, even if the bandit rotates mid-position).
+- Manage-processor calls `recordClosedTrade(allocator, championId, pnl)`
+  on close and saves the new allocator state back to Redis — bandit
+  attribution survives the trade lifecycle.
+- **Scope-down vs. spec**: the per-variant `step()` shadow execution
+  (paper-mode performance attribution across ALL variants every tick)
+  has NOT moved into the open-processor. In Phase 2 BullMQ mode the
+  bandit learns only from the champion's actual trades. The legacy
+  in-process loop keeps doing full shadow execution when the flag is
+  false. This is the safe path; moving shadow execution into the
+  recurring open-tick was deemed out-of-budget for Phase 2.
+- Multi-symbol rotation / scanner-driven symbol selection is simplified
+  in the open-processor (uses `config.symbol`). The legacy in-process
+  loop's scanner gating remains canonical until Phase 3.
+
+Test delta: 263 baseline → 319 (+56 new). Typecheck green.
+
+### Phase 3 (deferred)
+
+- Move ma-crossover shadow execution (per-variant `step()`) into the
+  BullMQ open-tick so the bandit can attribute paper performance across
+  ALL variants in BullMQ mode (not just the champion's actual trades).
+- Drop the in-process legacy paths from `run-trader.ts` once the BullMQ
+  flags have been live for ≥1 month with no regressions.
+- Scanner-driven symbol rotation inside the ma-crossover open-processor
+  (currently delegated to legacy loop).
 
 ---
 

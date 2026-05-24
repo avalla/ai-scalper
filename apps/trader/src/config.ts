@@ -118,6 +118,20 @@ export interface TraderConfig {
    * Defaults to false for backward compatibility.
    */
   llmManagedUseBullmqJobs: boolean;
+  /**
+   * Phase 2 — per-strategy BullMQ migration flags. When TRUE the in-process
+   * `run<Strategy>Tick` loop becomes a no-op and the trader subprocess
+   * idles; trades are owned by the worker stack via the per-strategy
+   * `open-decision` + `trade-management` queues.
+   * All default to FALSE for backward compat.
+   */
+  fundingArbUseBullmqJobs: boolean;
+  longerTfUseBullmqJobs: boolean;
+  bollingerAdxUseBullmqJobs: boolean;
+  basisArbUseBullmqJobs: boolean;
+  pairsTradingUseBullmqJobs: boolean;
+  calendarSpreadUseBullmqJobs: boolean;
+  maCrossoverUseBullmqJobs: boolean;
   // Calendar-spread strategy parameters (perp vs dated quarterly futures)
   calendarPerpSymbol: string;
   calendarDatedSymbol: string;
@@ -415,6 +429,27 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     llmManagedUseBullmqJobs: env.LLM_MANAGED_USE_BULLMQ_JOBS
       ? env.LLM_MANAGED_USE_BULLMQ_JOBS === "true"
       : ((cfg as { llmManaged?: { useBullmqJobs?: boolean } }).llmManaged?.useBullmqJobs ?? false),
+    fundingArbUseBullmqJobs: env.FUNDING_ARB_USE_BULLMQ_JOBS
+      ? env.FUNDING_ARB_USE_BULLMQ_JOBS === "true"
+      : ((cfg as { fundingArb?: { useBullmqJobs?: boolean } }).fundingArb?.useBullmqJobs ?? false),
+    longerTfUseBullmqJobs: env.LONGER_TF_USE_BULLMQ_JOBS
+      ? env.LONGER_TF_USE_BULLMQ_JOBS === "true"
+      : ((cfg as { longerTf?: { useBullmqJobs?: boolean } }).longerTf?.useBullmqJobs ?? false),
+    bollingerAdxUseBullmqJobs: env.BOLLINGER_ADX_USE_BULLMQ_JOBS
+      ? env.BOLLINGER_ADX_USE_BULLMQ_JOBS === "true"
+      : ((cfg as { bollingerAdx?: { useBullmqJobs?: boolean } }).bollingerAdx?.useBullmqJobs ?? false),
+    basisArbUseBullmqJobs: env.BASIS_ARB_USE_BULLMQ_JOBS
+      ? env.BASIS_ARB_USE_BULLMQ_JOBS === "true"
+      : ((cfg as { basisArb?: { useBullmqJobs?: boolean } }).basisArb?.useBullmqJobs ?? false),
+    pairsTradingUseBullmqJobs: env.PAIRS_TRADING_USE_BULLMQ_JOBS
+      ? env.PAIRS_TRADING_USE_BULLMQ_JOBS === "true"
+      : ((cfg as { pairs?: { useBullmqJobs?: boolean } }).pairs?.useBullmqJobs ?? false),
+    calendarSpreadUseBullmqJobs: env.CALENDAR_SPREAD_USE_BULLMQ_JOBS
+      ? env.CALENDAR_SPREAD_USE_BULLMQ_JOBS === "true"
+      : ((cfg as { calendarSpread?: { useBullmqJobs?: boolean } }).calendarSpread?.useBullmqJobs ?? false),
+    maCrossoverUseBullmqJobs: env.MA_CROSSOVER_USE_BULLMQ_JOBS
+      ? env.MA_CROSSOVER_USE_BULLMQ_JOBS === "true"
+      : ((cfg as { maCrossover?: { useBullmqJobs?: boolean } }).maCrossover?.useBullmqJobs ?? false),
     calendarPerpSymbol: env.CALENDAR_PERP_SYMBOL
       ?? ((cfg as { calendarSpread?: { perpSymbol?: string } }).calendarSpread?.perpSymbol ?? "BTCUSDT"),
     calendarDatedSymbol: env.CALENDAR_DATED_SYMBOL

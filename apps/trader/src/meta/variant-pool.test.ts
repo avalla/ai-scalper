@@ -3,7 +3,7 @@ import { defaultVariantPool } from "./variant-pool";
 import type { TraderConfig } from "../config";
 
 function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
-  return {
+  const cfg: TraderConfig = {
     mode: "trade",
     tradingProfile: "standard",
     entryExecutionMode: "taker",
@@ -113,6 +113,13 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     llmManagedTimeoutMs: 15000,
     llmManagedPostCutLossCooldownMs: 1800000,
     llmManagedUseBullmqJobs: false,
+    fundingArbUseBullmqJobs: false,
+    longerTfUseBullmqJobs: false,
+    bollingerAdxUseBullmqJobs: false,
+    basisArbUseBullmqJobs: false,
+    pairsTradingUseBullmqJobs: false,
+    calendarSpreadUseBullmqJobs: false,
+    maCrossoverUseBullmqJobs: false,
     basisArbEntryThresholdBps: 8,
     basisArbExitThresholdBps: 2,
     basisArbMaxNotionalUsd: 100,
@@ -152,8 +159,8 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     orderSupervisorModel: "claude-haiku-4-5-20251001",
     orderSupervisorTimeoutMs: 8000,
     orderSupervisorOnErrorBehavior: "reject" as const,
-    ...overrides,
   };
+  return { ...cfg, ...overrides };
 }
 
 const AGG_IDS = ["agg-25x-tight", "agg-50x-tight", "agg-75x-balanced", "agg-100x-btc-only", "agg-50x-relaxed"];

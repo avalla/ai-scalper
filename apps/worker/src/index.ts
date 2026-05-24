@@ -13,6 +13,13 @@ import { createRedisConnection } from "./redis";
 import { summarizeTraderStdout } from "./trader-log-summary";
 import { readTraderConfig } from "../../trader/src/config";
 import { startLlmManagedWorkerStack, type LlmManagedWorkerStack } from "./llm-managed-workers";
+import { startFundingArbWorkerStack, type FundingArbWorkerStack } from "./funding-arb-workers";
+import { startLongerTfWorkerStack, type LongerTfWorkerStack } from "./longer-tf-workers";
+import { startBollingerAdxWorkerStack, type BollingerAdxWorkerStack } from "./bollinger-adx-workers";
+import { startBasisArbWorkerStack, type BasisArbWorkerStack } from "./basis-arb-workers";
+import { startPairsTradingWorkerStack, type PairsTradingWorkerStack } from "./pairs-trading-workers";
+import { startCalendarSpreadWorkerStack, type CalendarSpreadWorkerStack } from "./calendar-spread-workers";
+import { startMaCrossoverWorkerStack, type MaCrossoverWorkerStack } from "./ma-crossover-workers";
 
 const scanJobTimeoutMs = Number(process.env.SCAN_JOB_TIMEOUT_MS || "30000");
 const scanScheduleEnabled = process.env.SCAN_SCHEDULE_ENABLED !== "false";
@@ -316,6 +323,13 @@ paperSessionWorker.on("failed", logFailure(QUEUE_NAMES.paperSession));
 liveSessionWorker.on("failed", logFailure(QUEUE_NAMES.liveSession));
 
 let llmManagedStack: LlmManagedWorkerStack | null = null;
+let fundingArbStack: FundingArbWorkerStack | null = null;
+let longerTfStack: LongerTfWorkerStack | null = null;
+let bollingerAdxStack: BollingerAdxWorkerStack | null = null;
+let basisArbStack: BasisArbWorkerStack | null = null;
+let pairsTradingStack: PairsTradingWorkerStack | null = null;
+let calendarSpreadStack: CalendarSpreadWorkerStack | null = null;
+let maCrossoverStack: MaCrossoverWorkerStack | null = null;
 
 async function main(): Promise<void> {
   await queue.waitUntilReady();
@@ -347,6 +361,75 @@ async function main(): Promise<void> {
     console.warn(JSON.stringify({
       level: "warn",
       event: "llm-managed-bullmq-bootstrap-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+
+  // ── Phase 2 PoC: per-strategy BullMQ workers (gated) ─────────────────
+  try {
+    const cfg = readTraderConfig();
+    const startStack = async <S>(params: {
+      strategy: "funding-arb" | "longer-tf" | "bollinger-adx" | "basis-arb" | "pairs-trading" | "calendar-spread" | "ma-crossover";
+      flag: boolean;
+      openQ: string; manageQ: string;
+      start: () => Promise<S>;
+      assign: (s: S) => void;
+    }) => {
+      if (cfg.strategyType !== params.strategy || !params.flag) return;
+      const stack = await params.start();
+      params.assign(stack);
+      activeQueues.push(params.openQ, params.manageQ);
+      const ow = (stack as unknown as { openWorker: { on: (e: string, h: (...args: unknown[]) => void) => void } }).openWorker;
+      const mw = (stack as unknown as { manageWorker: { on: (e: string, h: (...args: unknown[]) => void) => void } }).manageWorker;
+      ow.on("failed", logFailure(params.openQ) as unknown as (...args: unknown[]) => void);
+      mw.on("failed", logFailure(params.manageQ) as unknown as (...args: unknown[]) => void);
+    };
+    await startStack({
+      strategy: "funding-arb", flag: cfg.fundingArbUseBullmqJobs,
+      openQ: QUEUE_NAMES.fundingArbOpenDecision, manageQ: QUEUE_NAMES.fundingArbTradeManagement,
+      start: () => startFundingArbWorkerStack({ connection, config: cfg }),
+      assign: (s) => { fundingArbStack = s; },
+    });
+    await startStack({
+      strategy: "longer-tf", flag: cfg.longerTfUseBullmqJobs,
+      openQ: QUEUE_NAMES.longerTfOpenDecision, manageQ: QUEUE_NAMES.longerTfTradeManagement,
+      start: () => startLongerTfWorkerStack({ connection, config: cfg }),
+      assign: (s) => { longerTfStack = s; },
+    });
+    await startStack({
+      strategy: "bollinger-adx", flag: cfg.bollingerAdxUseBullmqJobs,
+      openQ: QUEUE_NAMES.bollingerAdxOpenDecision, manageQ: QUEUE_NAMES.bollingerAdxTradeManagement,
+      start: () => startBollingerAdxWorkerStack({ connection, config: cfg }),
+      assign: (s) => { bollingerAdxStack = s; },
+    });
+    await startStack({
+      strategy: "basis-arb", flag: cfg.basisArbUseBullmqJobs,
+      openQ: QUEUE_NAMES.basisArbOpenDecision, manageQ: QUEUE_NAMES.basisArbTradeManagement,
+      start: () => startBasisArbWorkerStack({ connection, config: cfg }),
+      assign: (s) => { basisArbStack = s; },
+    });
+    await startStack({
+      strategy: "pairs-trading", flag: cfg.pairsTradingUseBullmqJobs,
+      openQ: QUEUE_NAMES.pairsTradingOpenDecision, manageQ: QUEUE_NAMES.pairsTradingTradeManagement,
+      start: () => startPairsTradingWorkerStack({ connection, config: cfg }),
+      assign: (s) => { pairsTradingStack = s; },
+    });
+    await startStack({
+      strategy: "calendar-spread", flag: cfg.calendarSpreadUseBullmqJobs,
+      openQ: QUEUE_NAMES.calendarSpreadOpenDecision, manageQ: QUEUE_NAMES.calendarSpreadTradeManagement,
+      start: () => startCalendarSpreadWorkerStack({ connection, config: cfg }),
+      assign: (s) => { calendarSpreadStack = s; },
+    });
+    await startStack({
+      strategy: "ma-crossover", flag: cfg.maCrossoverUseBullmqJobs,
+      openQ: QUEUE_NAMES.maCrossoverOpenDecision, manageQ: QUEUE_NAMES.maCrossoverTradeManagement,
+      start: () => startMaCrossoverWorkerStack({ connection, config: cfg }),
+      assign: (s) => { maCrossoverStack = s; },
+    });
+  } catch (err) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      event: "phase2-bullmq-bootstrap-failed",
       error: err instanceof Error ? err.message : String(err),
     }));
   }
@@ -399,6 +482,34 @@ async function shutdown(signal: string): Promise<void> {
     if (llmManagedStack) {
       await llmManagedStack.shutdown();
       console.log(JSON.stringify({ event: "shutdown-progress", step: "llm-managed-stack-closed" }));
+    }
+    if (fundingArbStack) {
+      await fundingArbStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "funding-arb-stack-closed" }));
+    }
+    if (longerTfStack) {
+      await longerTfStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "longer-tf-stack-closed" }));
+    }
+    if (bollingerAdxStack) {
+      await bollingerAdxStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "bollinger-adx-stack-closed" }));
+    }
+    if (basisArbStack) {
+      await basisArbStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "basis-arb-stack-closed" }));
+    }
+    if (pairsTradingStack) {
+      await pairsTradingStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "pairs-trading-stack-closed" }));
+    }
+    if (calendarSpreadStack) {
+      await calendarSpreadStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "calendar-spread-stack-closed" }));
+    }
+    if (maCrossoverStack) {
+      await maCrossoverStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "ma-crossover-stack-closed" }));
     }
     await connection.quit();
     console.log(JSON.stringify({ event: "shutdown-complete" }));
