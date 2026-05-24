@@ -9,6 +9,7 @@
  */
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { CalendarSpreadManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
@@ -26,6 +27,7 @@ export interface CalendarSpreadManageProcessorLedger {
 export interface CalendarSpreadManageProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   sharedState: StrategySharedState;
   positionLedger: CalendarSpreadManageProcessorLedger;
@@ -42,7 +44,7 @@ export async function processCalendarSpreadManageTick(
   jobData: CalendarSpreadManageJobData,
   deps: CalendarSpreadManageProcessorDeps,
 ): Promise<CalendarSpreadManageTickResult> {
-  const { config, client, alerter, sharedState, positionLedger } = deps;
+  const { config, client, tickerSource, alerter, sharedState, positionLedger } = deps;
   const decideFn = deps.decideFn ?? calendarDecide;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
@@ -78,8 +80,8 @@ export async function processCalendarSpreadManageTick(
   let datedPrice = jobData.datedEntryPrice;
   try {
     const [perpT, datedT] = await Promise.all([
-      client.getTicker({ category: "linear", symbol: jobData.perpSymbol }),
-      client.getTicker({ category: "linear", symbol: jobData.datedSymbol }),
+      tickerSource.getTicker(jobData.perpSymbol, { category: "linear" }),
+      tickerSource.getTicker(jobData.datedSymbol, { category: "linear" }),
     ]);
     const p = Number(perpT.lastPrice); const d = Number(datedT.lastPrice);
     if (Number.isFinite(p) && p > 0) perpPrice = p;

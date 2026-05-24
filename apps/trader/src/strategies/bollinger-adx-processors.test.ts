@@ -29,6 +29,13 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
   };
 }
 
+function makeTickerSource(opts: { lastPrice?: number } = {}): any {
+  return {
+    async getTicker() { return { lastPrice: String(opts.lastPrice ?? 100) }; },
+    peek() { return null; },
+  };
+}
+
 function makeShared(opts: { hasActive?: boolean } = {}): StrategySharedState {
   return {
     async hasActivePosition() { return opts.hasActive ?? false; },
@@ -43,6 +50,7 @@ describe("processBollingerAdxOpenTick", () => {
   test("skips when active position exists", async () => {
     const deps: BollingerAdxOpenProcessorDeps = {
       config: makeConfig(), client: {} as any,
+      tickerSource: makeTickerSource(),
       alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared({ hasActive: true }),
@@ -63,6 +71,7 @@ describe("processBollingerAdxOpenTick", () => {
         async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
         async setLeverage() {}, async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 100 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared(),
@@ -87,6 +96,7 @@ describe("processBollingerAdxOpenTick", () => {
         async getTicker() { return { lastPrice: "100" }; },
         async getKlines() { return { list: [["0", "0", "100", "100", "100", "0"]] }; },
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 100 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared(),
@@ -124,6 +134,7 @@ describe("processBollingerAdxManageTick", () => {
         async getPosition() { return { size: "1" }; },
         async getTicker() { return { lastPrice: "100.5" }; },
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 100.5 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },
@@ -143,6 +154,7 @@ describe("processBollingerAdxManageTick", () => {
         async getTicker() { return { lastPrice: "102" }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 102 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },

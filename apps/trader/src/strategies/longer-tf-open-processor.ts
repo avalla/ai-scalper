@@ -18,6 +18,7 @@ import {
 } from "@ai-scalper/queueing";
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import { longerTfSignal, type LongerTfKlineCache } from "./longer-tf";
@@ -47,6 +48,7 @@ export function createInMemoryKlineCacheStore(): KlineCacheStore {
 export interface LongerTfOpenProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   manageQueue: ManageQueueLike<LongerTfManageJobData>;
   sharedState: StrategySharedState;
@@ -76,7 +78,7 @@ export async function processLongerTfOpenTick(
   _jobData: LongerTfOpenTickJobData,
   deps: LongerTfOpenProcessorDeps,
 ): Promise<LongerTfOpenTickResult> {
-  const { config, client, alerter, manageQueue, sharedState, klineCacheStore } = deps;
+  const { config, client, tickerSource, alerter, manageQueue, sharedState, klineCacheStore } = deps;
   const signalFn = deps.signalFn ?? longerTfSignal;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
@@ -130,7 +132,7 @@ export async function processLongerTfOpenTick(
 
   let lastPrice = 0;
   try {
-    const t = await client.getTicker({ category: "linear", symbol });
+    const t = await tickerSource.getTicker(symbol, { category: "linear" });
     lastPrice = Number(t.lastPrice);
   } catch (err) {
     log({

@@ -7,6 +7,8 @@ import {
 } from "@ai-scalper/queueing";
 
 import { createBybitClient } from "@ai-scalper/bybit-client";
+import { createRestTickerSource, createCachedTickerSource } from "@ai-scalper/bybit-client/ticker-source";
+import { createRedisTickerCache } from "@ai-scalper/bybit-client/ws-redis-cache";
 import type { TraderConfig } from "../../trader/src/config";
 import { createWebhookAlerter } from "../../trader/src/alerts/webhook";
 import { createStrategySharedState, type StrategySharedState } from "../../trader/src/strategies/shared/bullmq-shared-state";
@@ -36,6 +38,13 @@ export async function startCalendarSpreadWorkerStack(deps: {
     QUEUE_NAMES.calendarSpreadTradeManagement, { connection, defaultJobOptions: STRATEGY_JOB_POLICY },
   );
   const client = createBybitClient();
+  const tickerSource = config.useWebSocket
+    ? createCachedTickerSource({
+        cache: createRedisTickerCache(connection),
+        fallback: client,
+        defaultMaxAgeMs: 5_000,
+      })
+    : createRestTickerSource(client);
   const alerter = createWebhookAlerter(config.alertWebhookUrl);
   const positionLedger = createPositionLedger();
   const sharedState = createStrategySharedState({ strategy: "calendar-spread", redis: connection, manageQueue });
@@ -44,7 +53,7 @@ export async function startCalendarSpreadWorkerStack(deps: {
     QUEUE_NAMES.calendarSpreadOpenDecision,
     async (job) => {
       if (job.name !== JOB_NAMES.calendarSpreadOpenTick) throw new Error(`Unsupported job name: ${job.name}`);
-      return processCalendarSpreadOpenTick(job.data, { config, client, alerter, manageQueue, sharedState });
+      return processCalendarSpreadOpenTick(job.data, { config, client, tickerSource, alerter, manageQueue, sharedState });
     },
     { connection, concurrency: 1 },
   );
@@ -53,7 +62,7 @@ export async function startCalendarSpreadWorkerStack(deps: {
     QUEUE_NAMES.calendarSpreadTradeManagement,
     async (job) => {
       if (job.name !== JOB_NAMES.calendarSpreadManageTick) throw new Error(`Unsupported job name: ${job.name}`);
-      const result = await processCalendarSpreadManageTick(job.data, { config, client, alerter, sharedState, positionLedger });
+      const result = await processCalendarSpreadManageTick(job.data, { config, client, tickerSource, alerter, sharedState, positionLedger });
       if (result.status === "continue") {
         try { await job.updateData(result.updatedData); } catch (err) {
           console.warn(JSON.stringify({ event: "calendar-spread-update-data-failed", error: err instanceof Error ? err.message : String(err) }));

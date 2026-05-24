@@ -36,6 +36,13 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
   };
 }
 
+function makeTickerSource(opts: { lastPrice?: number } = {}): any {
+  return {
+    async getTicker() { return { lastPrice: String(opts.lastPrice ?? 100) }; },
+    peek() { return null; },
+  };
+}
+
 function makeShared(opts: { hasActive?: boolean } = {}): StrategySharedState {
   return {
     async hasActivePosition() { return opts.hasActive ?? false; },
@@ -59,7 +66,8 @@ function makeAllocatorStore(): AllocatorStore & { state: AllocatorState | null }
 describe("processMaCrossoverOpenTick", () => {
   test("skips when active position exists", async () => {
     const deps: MaCrossoverOpenProcessorDeps = {
-      config: makeConfig(), client: {} as any, alerter: { async send() {} } as any,
+      config: makeConfig(), client: {} as any, tickerSource: makeTickerSource(),
+      alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared({ hasActive: true }),
       allocatorStore: makeAllocatorStore(),
@@ -84,6 +92,7 @@ describe("processMaCrossoverOpenTick", () => {
         async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
         async setLeverage() {}, async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 100 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared(),
@@ -119,6 +128,7 @@ describe("processMaCrossoverOpenTick", () => {
     const deps: MaCrossoverOpenProcessorDeps = {
       config: makeConfig({ symbol: "ETHUSDT" }),
       client: {} as any,
+      tickerSource: makeTickerSource(),
       alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared(),
@@ -168,6 +178,7 @@ describe("processMaCrossoverManageTick", () => {
         async getTicker() { return { lastPrice: "102" }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 102 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },
@@ -195,6 +206,7 @@ describe("processMaCrossoverManageTick", () => {
         async getPosition() { return { size: "1" }; },
         async getTicker() { return { lastPrice: "100.5" }; },
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 100.5 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition() {} },

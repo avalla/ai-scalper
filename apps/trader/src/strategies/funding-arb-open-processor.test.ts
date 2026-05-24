@@ -76,6 +76,25 @@ function makeClient(opts: {
   } as any;
 }
 
+function makeTickerSource(opts: {
+  lastPrice?: number;
+  fundingRate?: number;
+  nextFundingTime?: number;
+  fail?: boolean;
+} = {}) {
+  return {
+    async getTicker() {
+      if (opts.fail) throw new Error("net down");
+      return {
+        lastPrice: String(opts.lastPrice ?? 50_000),
+        fundingRate: String(opts.fundingRate ?? 0.001),
+        nextFundingTime: String(opts.nextFundingTime ?? Date.now() + 2 * 60_000),
+      };
+    },
+    peek() { return null; },
+  } as any;
+}
+
 function makeDeps(overrides: Partial<FundingArbOpenProcessorDeps> = {}): FundingArbOpenProcessorDeps & {
   _manage: ReturnType<typeof makeManageQueue>;
 } {
@@ -83,6 +102,7 @@ function makeDeps(overrides: Partial<FundingArbOpenProcessorDeps> = {}): Funding
   const deps: FundingArbOpenProcessorDeps = {
     config: makeConfig(),
     client: makeClient(),
+    tickerSource: makeTickerSource(),
     alerter: makeAlerter(),
     manageQueue: _manage,
     sharedState: makeShared(),
@@ -108,6 +128,7 @@ describe("processFundingArbOpenTick", () => {
   test("skips when funding-rate magnitude is below the configured floor", async () => {
     const deps = makeDeps({
       client: makeClient({ fundingRate: 0.0001 }), // 1 bps — below default 5
+      tickerSource: makeTickerSource({ fundingRate: 0.0001 }),
     });
     const result = await processFundingArbOpenTick(
       { triggeredAt: "now", configFile: "config.funding-arb.json" },
@@ -123,6 +144,7 @@ describe("processFundingArbOpenTick", () => {
     const deps = makeDeps({
       now: () => now,
       client: makeClient({ lastPrice: 50_000, fundingRate: 0.001, nextFundingTime: nextFunding }),
+      tickerSource: makeTickerSource({ lastPrice: 50_000, fundingRate: 0.001, nextFundingTime: nextFunding }),
     });
     const result = await processFundingArbOpenTick(
       { triggeredAt: "now", configFile: "config.funding-arb.json" },
@@ -148,6 +170,7 @@ describe("processFundingArbOpenTick", () => {
     const deps = makeDeps({
       now: () => now,
       client: makeClient({ fundingRate: -0.001, nextFundingTime: now + 2 * 60_000 }),
+      tickerSource: makeTickerSource({ fundingRate: -0.001, nextFundingTime: now + 2 * 60_000 }),
     });
     const result = await processFundingArbOpenTick(
       { triggeredAt: "now", configFile: "config.funding-arb.json" },
@@ -162,7 +185,7 @@ describe("processFundingArbOpenTick", () => {
       async getTicker() { throw new Error("net down"); },
       async getInstrumentInfo() { throw new Error("nope"); },
     } as any;
-    const deps = makeDeps({ client: failClient });
+    const deps = makeDeps({ client: failClient, tickerSource: makeTickerSource({ fail: true }) });
     const result = await processFundingArbOpenTick(
       { triggeredAt: "now", configFile: "config.funding-arb.json" },
       deps,

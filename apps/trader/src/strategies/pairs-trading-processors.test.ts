@@ -27,6 +27,16 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
   };
 }
 
+function makeTickerSource(opts: { leg1Price?: number; leg2Price?: number } = {}): any {
+  return {
+    async getTicker(symbol: string) {
+      const isLeg1 = symbol === "BTCUSDT";
+      return { lastPrice: String(isLeg1 ? (opts.leg1Price ?? 50000) : (opts.leg2Price ?? 3000)) };
+    },
+    peek() { return null; },
+  };
+}
+
 function makeShared(opts: { hasActive?: boolean } = {}): StrategySharedState {
   return {
     async hasActivePosition() { return opts.hasActive ?? false; },
@@ -48,6 +58,7 @@ describe("processPairsTradingOpenTick", () => {
         async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ leg1Price: 50000, leg2Price: 3000 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared(),
@@ -82,6 +93,7 @@ describe("processPairsTradingOpenTick", () => {
           if (args.symbol === "BTCUSDT" && args.reduceOnly) { compensated = true; }
         },
       } as any,
+      tickerSource: makeTickerSource({ leg1Price: 50000, leg2Price: 3000 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared(),
@@ -117,6 +129,7 @@ describe("processPairsTradingManageTick", () => {
         async getKlines() { return { list: [] }; },
         async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "3000" }; },
       } as any,
+      tickerSource: makeTickerSource({ leg1Price: 50000, leg2Price: 3000 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition() {} },
@@ -140,6 +153,7 @@ describe("processPairsTradingManageTick", () => {
         async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50100" : "2995" }; },
         async createOrder(args: any) { orders.push(args); },
       } as any,
+      tickerSource: makeTickerSource({ leg1Price: 50100, leg2Price: 2995 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },
@@ -170,6 +184,7 @@ describe("processPairsTradingManageTick", () => {
         async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "3000" }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ leg1Price: 50000, leg2Price: 3000 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },

@@ -12,6 +12,7 @@ import {
 } from "@ai-scalper/queueing";
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import { basisArbDecide, computeBasisBps } from "./basis-arb";
@@ -27,6 +28,7 @@ export interface ManageQueueLike<TData> {
 export interface BasisArbOpenProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   manageQueue: ManageQueueLike<BasisArbManageJobData>;
   sharedState: StrategySharedState;
@@ -55,7 +57,7 @@ export async function processBasisArbOpenTick(
   _jobData: BasisArbOpenTickJobData,
   deps: BasisArbOpenProcessorDeps,
 ): Promise<BasisArbOpenTickResult> {
-  const { config, client, alerter, manageQueue, sharedState } = deps;
+  const { config, client, tickerSource, alerter, manageQueue, sharedState } = deps;
   const decideFn = deps.decideFn ?? basisArbDecide;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
@@ -70,8 +72,8 @@ export async function processBasisArbOpenTick(
   let perpPrice = 0; let spotPrice = 0; let fundingRateBps = 0;
   try {
     const [perpT, spotT] = await Promise.all([
-      client.getTicker({ category: "linear", symbol }),
-      client.getTicker({ category: "spot", symbol }),
+      tickerSource.getTicker(symbol, { category: "linear" }),
+      tickerSource.getTicker(symbol, { category: "spot" }),
     ]);
     perpPrice = Number(perpT.lastPrice);
     spotPrice = Number(spotT.lastPrice);

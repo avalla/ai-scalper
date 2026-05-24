@@ -25,6 +25,7 @@
  */
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { LlmManagedManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
@@ -51,6 +52,7 @@ export interface ManageProcessorLedger {
 export interface LlmManagedManageProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   sharedState: LlmManagedSharedState;
   positionLedger: ManageProcessorLedger;
@@ -139,7 +141,7 @@ export async function processLlmManagedManageTick(
   jobData: LlmManagedManageJobData,
   deps: LlmManagedManageProcessorDeps,
 ): Promise<LlmManagedManageTickResult> {
-  const { config, client, alerter, sharedState, positionLedger, collectMarketContext } = deps;
+  const { config, client, tickerSource, alerter, sharedState, positionLedger, collectMarketContext } = deps;
   const getManageDecisionFn = deps.getManageDecisionFn ?? defaultGetManageDecision;
   const log = deps.log ?? ((payload) => console.log(JSON.stringify(payload)));
   const now = (deps.now ?? Date.now)();
@@ -183,7 +185,7 @@ export async function processLlmManagedManageTick(
   // ── (2) Current price + excursions ──────────────────────────────────────
   let currentPrice = runtime.entryPrice;
   try {
-    const t = await client.getTicker({ category: "linear", symbol: jobData.symbol });
+    const t = await tickerSource.getTicker(jobData.symbol, { category: "linear" });
     const p = Number(t.lastPrice);
     if (Number.isFinite(p) && p > 0) currentPrice = p;
   } catch (err) {
@@ -231,7 +233,7 @@ export async function processLlmManagedManageTick(
     };
     return executeAndMaybeComplete({
       decision: override, runtime, jobData, currentPrice, observedAt,
-      config, client, alerter, sharedState, positionLedger, log, now,
+      config, client, tickerSource, alerter, sharedState, positionLedger, log, now,
     });
   }
 
@@ -274,7 +276,7 @@ export async function processLlmManagedManageTick(
 
   return executeAndMaybeComplete({
     decision: manage, runtime, jobData, currentPrice, observedAt,
-    config, client, alerter, sharedState, positionLedger, log, now,
+    config, client, tickerSource, alerter, sharedState, positionLedger, log, now,
   });
 }
 
@@ -327,6 +329,7 @@ interface ExecuteCtx {
   observedAt: string;
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   sharedState: LlmManagedSharedState;
   positionLedger: ManageProcessorLedger;
@@ -339,7 +342,7 @@ interface ExecuteCtx {
  * repeats) or `continue` (job keeps repeating, with mutated data).
  */
 async function executeAndMaybeComplete(ctx: ExecuteCtx): Promise<LlmManagedManageTickResult> {
-  const { decision, runtime, jobData, currentPrice, observedAt, config, client, alerter, sharedState, positionLedger, log, now } = ctx;
+  const { decision, runtime, jobData, currentPrice, observedAt, config, client, tickerSource, alerter, sharedState, positionLedger, log, now } = ctx;
 
   // HOLD — no I/O, persist mfe/mae + history.
   if (decision.action === "hold") {
@@ -450,7 +453,7 @@ async function executeAndMaybeComplete(ctx: ExecuteCtx): Promise<LlmManagedManag
     let hedgePrice = currentPrice;
     if (hedgeSymbol !== runtime.symbol) {
       try {
-        const t = await client.getTicker({ category: "linear", symbol: hedgeSymbol });
+        const t = await tickerSource.getTicker(hedgeSymbol, { category: "linear" });
         const p = Number(t.lastPrice);
         if (Number.isFinite(p) && p > 0) hedgePrice = p;
       } catch { /* ignore */ }

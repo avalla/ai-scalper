@@ -8,6 +8,7 @@
  */
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { MaCrossoverManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
@@ -26,6 +27,7 @@ export interface MaCrossoverManageProcessorLedger {
 export interface MaCrossoverManageProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   sharedState: StrategySharedState;
   positionLedger: MaCrossoverManageProcessorLedger;
@@ -42,7 +44,7 @@ export async function processMaCrossoverManageTick(
   jobData: MaCrossoverManageJobData,
   deps: MaCrossoverManageProcessorDeps,
 ): Promise<MaCrossoverManageTickResult> {
-  const { config, client, alerter, sharedState, positionLedger, allocatorStore } = deps;
+  const { config, client, tickerSource, alerter, sharedState, positionLedger, allocatorStore } = deps;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
   const observedAt = new Date(now).toISOString();
@@ -68,7 +70,7 @@ export async function processMaCrossoverManageTick(
 
   let currentPrice = jobData.entryPrice;
   try {
-    const t = await client.getTicker({ category: "linear", symbol: jobData.symbol });
+    const t = await tickerSource.getTicker(jobData.symbol, { category: "linear" });
     const p = Number(t.lastPrice);
     if (Number.isFinite(p) && p > 0) currentPrice = p;
   } catch (err) {

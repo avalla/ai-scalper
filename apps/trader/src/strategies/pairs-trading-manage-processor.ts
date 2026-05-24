@@ -9,6 +9,7 @@
  */
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { PairsTradingManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
@@ -27,6 +28,7 @@ export interface PairsTradingManageProcessorLedger {
 export interface PairsTradingManageProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   sharedState: StrategySharedState;
   positionLedger: PairsTradingManageProcessorLedger;
@@ -44,7 +46,7 @@ export async function processPairsTradingManageTick(
   jobData: PairsTradingManageJobData,
   deps: PairsTradingManageProcessorDeps,
 ): Promise<PairsTradingManageTickResult> {
-  const { config, client, alerter, sharedState, positionLedger, pairsCacheStore } = deps;
+  const { config, client, tickerSource, alerter, sharedState, positionLedger, pairsCacheStore } = deps;
   const decideFn = deps.decideFn ?? pairsDecide;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
@@ -79,8 +81,8 @@ export async function processPairsTradingManageTick(
   let l1Price = jobData.leg1EntryPrice; let l2Price = jobData.leg2EntryPrice;
   try {
     const [t1, t2] = await Promise.all([
-      client.getTicker({ category: "linear", symbol: jobData.leg1Symbol }),
-      client.getTicker({ category: "linear", symbol: jobData.leg2Symbol }),
+      tickerSource.getTicker(jobData.leg1Symbol, { category: "linear" }),
+      tickerSource.getTicker(jobData.leg2Symbol, { category: "linear" }),
     ]);
     const p1 = Number(t1.lastPrice); const p2 = Number(t2.lastPrice);
     if (Number.isFinite(p1) && p1 > 0) l1Price = p1;

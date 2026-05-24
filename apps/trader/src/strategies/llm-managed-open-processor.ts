@@ -31,6 +31,7 @@ export interface ManageQueueLike {
   ): Promise<unknown>;
 }
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import {
@@ -45,6 +46,7 @@ type BybitClient = ReturnType<typeof createBybitClient>;
 export interface LlmManagedOpenProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   /** Queue used to enqueue the new manage job on a successful open. */
   manageQueue: ManageQueueLike;
@@ -83,7 +85,7 @@ export async function processLlmManagedOpenTick(
   deps: LlmManagedOpenProcessorDeps,
 ): Promise<LlmManagedOpenTickResult> {
   const {
-    config, client, alerter, manageQueue, sharedState,
+    config, client, tickerSource, alerter, manageQueue, sharedState,
     collectMarketContext, collectRecentPerformance, collectWallet,
   } = deps;
   const getOpenDecisionFn = deps.getOpenDecisionFn ?? defaultGetOpenDecision;
@@ -178,7 +180,7 @@ export async function processLlmManagedOpenTick(
   // ── (6) Fetch entry price + instrument info ─────────────────────────────
   let entryPrice = 0;
   try {
-    const t = await client.getTicker({ category: "linear", symbol });
+    const t = await tickerSource.getTicker(symbol, { category: "linear" });
     entryPrice = Number(t.lastPrice);
   } catch (err) {
     log({

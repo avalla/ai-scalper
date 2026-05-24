@@ -78,6 +78,16 @@ function makeClient(opts: { lastPrice?: number; positionSize?: number } = {}) {
   } as any;
 }
 
+function makeTickerSource(opts: { lastPrice?: number; fail?: boolean } = {}) {
+  return {
+    async getTicker() {
+      if (opts.fail) throw new Error("net");
+      return { lastPrice: String(opts.lastPrice ?? 50_000) };
+    },
+    peek() { return null; },
+  } as any;
+}
+
 function makeAlerter() { return { async send() {} } as any; }
 
 function makeDeps(overrides: Partial<FundingArbManageProcessorDeps> = {}): FundingArbManageProcessorDeps & {
@@ -89,6 +99,7 @@ function makeDeps(overrides: Partial<FundingArbManageProcessorDeps> = {}): Fundi
   const deps: FundingArbManageProcessorDeps = {
     config: makeConfig(),
     client: makeClient(),
+    tickerSource: makeTickerSource(),
     alerter: makeAlerter(),
     sharedState: _shared,
     positionLedger: _ledger,
@@ -114,6 +125,7 @@ describe("processFundingArbManageTick", () => {
     const deps = makeDeps({
       now: () => 1_700_000_180_000 + 2 * 60_000 + 1, // exit delay 2 min after funding
       client: makeClient({ lastPrice: 50_100 }), // small adverse move for short
+      tickerSource: makeTickerSource({ lastPrice: 50_100 }),
     });
     const result = await processFundingArbManageTick(makeJobData(), deps);
     expect(result.status).toBe("complete");
@@ -145,7 +157,7 @@ describe("processFundingArbManageTick", () => {
       async getPosition() { return { size: "0.01" }; },
       async createOrder() {},
     } as any;
-    const deps = makeDeps({ client: failClient });
+    const deps = makeDeps({ client: failClient, tickerSource: makeTickerSource({ fail: true }) });
     const result = await processFundingArbManageTick(makeJobData(), deps);
     expect(result.status).toBe("continue");
     expect(deps._ledger.entries).toHaveLength(0);

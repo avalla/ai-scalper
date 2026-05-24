@@ -9,6 +9,7 @@
  */
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { LongerTfManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
@@ -25,6 +26,7 @@ export interface LongerTfManageProcessorLedger {
 export interface LongerTfManageProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   sharedState: StrategySharedState;
   positionLedger: LongerTfManageProcessorLedger;
@@ -40,7 +42,7 @@ export async function processLongerTfManageTick(
   jobData: LongerTfManageJobData,
   deps: LongerTfManageProcessorDeps,
 ): Promise<LongerTfManageTickResult> {
-  const { config, client, alerter, sharedState, positionLedger } = deps;
+  const { config, client, tickerSource, alerter, sharedState, positionLedger } = deps;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
   const observedAt = new Date(now).toISOString();
@@ -67,7 +69,7 @@ export async function processLongerTfManageTick(
   // (2) ticker.
   let currentPrice = jobData.entryPrice;
   try {
-    const t = await client.getTicker({ category: "linear", symbol: jobData.symbol });
+    const t = await tickerSource.getTicker(jobData.symbol, { category: "linear" });
     const p = Number(t.lastPrice);
     if (Number.isFinite(p) && p > 0) currentPrice = p;
   } catch (err) {

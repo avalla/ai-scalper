@@ -29,6 +29,16 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
   };
 }
 
+function makeTickerSource(opts: { perpPrice?: number; datedPrice?: number } = {}): any {
+  return {
+    async getTicker(symbol: string) {
+      const isPerp = symbol === "BTCUSDT";
+      return { lastPrice: String(isPerp ? (opts.perpPrice ?? 50000) : (opts.datedPrice ?? 50300)) };
+    },
+    peek() { return null; },
+  };
+}
+
 function makeShared(opts: { hasActive?: boolean } = {}): StrategySharedState {
   return {
     async hasActivePosition() { return opts.hasActive ?? false; },
@@ -43,7 +53,8 @@ describe("processCalendarSpreadOpenTick", () => {
   test("skips when dated symbol not configured", async () => {
     const deps: CalendarSpreadOpenProcessorDeps = {
       config: makeConfig({ calendarDatedSymbol: "", calendarDatedDeliveryAt: 0 }),
-      client: {} as any, alerter: { async send() {} } as any,
+      client: {} as any, tickerSource: makeTickerSource(),
+      alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared(),
       log: () => {}, now: () => 0,
@@ -65,6 +76,7 @@ describe("processCalendarSpreadOpenTick", () => {
         async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50300 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared(),
@@ -92,6 +104,7 @@ describe("processCalendarSpreadOpenTick", () => {
           if (args.symbol === "BTCUSDT" && args.reduceOnly) { compensated = true; }
         },
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50300 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared(),
@@ -134,6 +147,7 @@ describe("processCalendarSpreadManageTick", () => {
         },
         async createOrder(args: any) { orders.push(args); },
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50010 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },
@@ -158,6 +172,7 @@ describe("processCalendarSpreadManageTick", () => {
         async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "50000" }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50000 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },

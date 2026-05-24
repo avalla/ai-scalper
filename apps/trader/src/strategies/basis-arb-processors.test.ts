@@ -24,6 +24,19 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
   };
 }
 
+function makeTickerSource(opts: { perpPrice?: number; spotPrice?: number } = {}): any {
+  return {
+    async getTicker(_symbol: string, callOpts?: { category?: string }) {
+      const isLinear = (callOpts?.category ?? "linear") === "linear";
+      return {
+        lastPrice: String(isLinear ? (opts.perpPrice ?? 50100) : (opts.spotPrice ?? 50000)),
+        fundingRate: "0",
+      };
+    },
+    peek() { return null; },
+  };
+}
+
 function makeShared(opts: { hasActive?: boolean } = {}): StrategySharedState & { last: number } {
   let last = 0;
   return {
@@ -50,6 +63,7 @@ describe("processBasisArbOpenTick", () => {
         async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50100, spotPrice: 50000 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared(),
@@ -81,6 +95,7 @@ describe("processBasisArbOpenTick", () => {
           if (args.category === "spot") { spotOrders += 1; throw new Error("spot venue down"); }
         },
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50100, spotPrice: 50000 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared(),
@@ -103,6 +118,7 @@ describe("processBasisArbOpenTick", () => {
         async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50010, spotPrice: 50000 }),
       alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared(),
@@ -143,6 +159,7 @@ describe("processBasisArbManageTick", () => {
         },
         async createOrder(args: any) { orders.push({ category: args.category, reduceOnly: args.reduceOnly }); },
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50010, spotPrice: 50000 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: ClosedPositionLedgerEntry) { entries.push(e); } },
@@ -168,6 +185,7 @@ describe("processBasisArbManageTick", () => {
         async getTicker(p: any) { return { lastPrice: p.category === "linear" ? "50100" : "50000", fundingRate: "0" }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50100, spotPrice: 50000 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition() {} },
@@ -186,6 +204,7 @@ describe("processBasisArbManageTick", () => {
         async getTicker(p: any) { return { lastPrice: p.category === "linear" ? "50000" : "50000", fundingRate: "0" }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, spotPrice: 50000 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },

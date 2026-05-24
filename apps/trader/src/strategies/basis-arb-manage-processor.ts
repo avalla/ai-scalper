@@ -8,6 +8,7 @@
  */
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { BasisArbManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
@@ -25,6 +26,7 @@ export interface BasisArbManageProcessorLedger {
 export interface BasisArbManageProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   sharedState: StrategySharedState;
   positionLedger: BasisArbManageProcessorLedger;
@@ -41,7 +43,7 @@ export async function processBasisArbManageTick(
   jobData: BasisArbManageJobData,
   deps: BasisArbManageProcessorDeps,
 ): Promise<BasisArbManageTickResult> {
-  const { config, client, alerter, sharedState, positionLedger } = deps;
+  const { config, client, tickerSource, alerter, sharedState, positionLedger } = deps;
   const decideFn = deps.decideFn ?? basisArbDecide;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
@@ -72,8 +74,8 @@ export async function processBasisArbManageTick(
   let spotPrice = jobData.spotEntryPrice;
   try {
     const [perpT, spotT] = await Promise.all([
-      client.getTicker({ category: "linear", symbol: jobData.symbol }),
-      client.getTicker({ category: "spot", symbol: jobData.symbol }),
+      tickerSource.getTicker(jobData.symbol, { category: "linear" }),
+      tickerSource.getTicker(jobData.symbol, { category: "spot" }),
     ]);
     const p = Number(perpT.lastPrice);
     const s = Number(spotT.lastPrice);

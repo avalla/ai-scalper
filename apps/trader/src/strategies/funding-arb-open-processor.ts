@@ -18,6 +18,7 @@ import {
 } from "@ai-scalper/queueing";
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import { fundingArbDecide, type FundingArbDecision } from "./funding-arb";
@@ -36,6 +37,7 @@ export interface ManageQueueLike<TData> {
 export interface FundingArbOpenProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   manageQueue: ManageQueueLike<FundingArbManageJobData>;
   sharedState: StrategySharedState;
@@ -63,7 +65,7 @@ export async function processFundingArbOpenTick(
   _jobData: FundingArbOpenTickJobData,
   deps: FundingArbOpenProcessorDeps,
 ): Promise<FundingArbOpenTickResult> {
-  const { config, client, alerter, manageQueue, sharedState } = deps;
+  const { config, client, tickerSource, alerter, manageQueue, sharedState } = deps;
   const decideFn = deps.decideFn ?? fundingArbDecide;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
@@ -82,7 +84,7 @@ export async function processFundingArbOpenTick(
   let fundingRateBps = 0;
   let nextFundingTime = 0;
   try {
-    const t = await client.getTicker({ category: "linear", symbol });
+    const t = await tickerSource.getTicker(symbol, { category: "linear" });
     lastPrice = Number(t.lastPrice);
     const fr = Number(t.fundingRate);
     fundingRateBps = Number.isFinite(fr) ? fr * 10_000 : 0;

@@ -67,6 +67,13 @@ function makeBybitStub(opts: { lastPrice?: number; positionSize?: number } = {})
   };
 }
 
+function makeTickerSourceStub(opts: { lastPrice?: number } = {}) {
+  return {
+    getTicker: async () => ({ lastPrice: String(opts.lastPrice ?? 100) }),
+    peek: () => null,
+  };
+}
+
 function makeLedgerStub(): ManageProcessorLedger & { _entries: ClosedPositionLedgerEntry[] } {
   const entries: ClosedPositionLedgerEntry[] = [];
   return {
@@ -112,6 +119,7 @@ function makeDeps(opts: {
   return {
     config: makeConfig(opts.config ?? {}),
     client: makeBybitStub({ lastPrice: opts.lastPrice, positionSize: opts.positionSize }) as unknown as LlmManagedManageProcessorDeps["client"],
+    tickerSource: makeTickerSourceStub({ lastPrice: opts.lastPrice }) as unknown as LlmManagedManageProcessorDeps["tickerSource"],
     alerter: makeAlerterStub() as unknown as LlmManagedManageProcessorDeps["alerter"],
     sharedState: shared as unknown as LlmManagedManageProcessorDeps["sharedState"],
     positionLedger: ledger,

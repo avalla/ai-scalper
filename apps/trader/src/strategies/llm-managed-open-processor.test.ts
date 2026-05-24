@@ -79,6 +79,13 @@ function makeBybitStub(overrides: { ticker?: number; instrument?: { qtyStep: str
   };
 }
 
+function makeTickerSourceStub(overrides: { ticker?: number } = {}) {
+  return {
+    getTicker: async () => ({ lastPrice: String(overrides.ticker ?? 100) }),
+    peek: () => null,
+  };
+}
+
 function makeAlerterStub() {
   const sent: string[] = [];
   return {
@@ -108,6 +115,7 @@ function makeDeps(
   return {
     config: makeConfig(overrides.config ?? {}),
     client: makeBybitStub() as unknown as LlmManagedOpenProcessorDeps["client"],
+    tickerSource: makeTickerSourceStub() as unknown as LlmManagedOpenProcessorDeps["tickerSource"],
     alerter: alerter as unknown as LlmManagedOpenProcessorDeps["alerter"],
     manageQueue: manage as unknown as LlmManagedOpenProcessorDeps["manageQueue"],
     sharedState: makeSharedState({

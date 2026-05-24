@@ -10,6 +10,7 @@ import {
 } from "@ai-scalper/queueing";
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import { bollingerAdxDecide, type BollingerAdxKlineCache } from "./bollinger-adx";
@@ -38,6 +39,7 @@ export function createInMemoryBollingerAdxKlineCacheStore(): BollingerAdxKlineCa
 export interface BollingerAdxOpenProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   manageQueue: ManageQueueLike<BollingerAdxManageJobData>;
   sharedState: StrategySharedState;
@@ -67,7 +69,7 @@ export async function processBollingerAdxOpenTick(
   _jobData: BollingerAdxOpenTickJobData,
   deps: BollingerAdxOpenProcessorDeps,
 ): Promise<BollingerAdxOpenTickResult> {
-  const { config, client, alerter, manageQueue, sharedState, klineCacheStore } = deps;
+  const { config, client, tickerSource, alerter, manageQueue, sharedState, klineCacheStore } = deps;
   const decideFn = deps.decideFn ?? bollingerAdxDecide;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
@@ -80,7 +82,7 @@ export async function processBollingerAdxOpenTick(
 
   let lastPrice = 0;
   try {
-    const t = await client.getTicker({ category: "linear", symbol });
+    const t = await tickerSource.getTicker(symbol, { category: "linear" });
     lastPrice = Number(t.lastPrice);
   } catch (err) {
     log({

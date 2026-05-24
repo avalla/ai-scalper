@@ -30,6 +30,7 @@ import {
 } from "@ai-scalper/queueing";
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import { buildSignal } from "@ai-scalper/trading-core";
@@ -70,6 +71,7 @@ export function createInMemoryPriceHistoryStore(): PriceHistoryStore {
 export interface MaCrossoverOpenProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   manageQueue: ManageQueueLike<MaCrossoverManageJobData>;
   sharedState: StrategySharedState;
@@ -106,7 +108,7 @@ export async function processMaCrossoverOpenTick(
   _jobData: MaCrossoverOpenTickJobData,
   deps: MaCrossoverOpenProcessorDeps,
 ): Promise<MaCrossoverOpenTickResult> {
-  const { config, client, alerter, manageQueue, sharedState, allocatorStore, priceHistoryStore } = deps;
+  const { config, client, tickerSource, alerter, manageQueue, sharedState, allocatorStore, priceHistoryStore } = deps;
   const variantPoolFn = deps.variantPoolFn ?? defaultVariantPool;
   const selectChampionFn = deps.selectChampionFn ?? selectChampion;
   const buildSignalFn = deps.buildSignalFn ?? buildSignal;
@@ -149,7 +151,7 @@ export async function processMaCrossoverOpenTick(
   // (4) Fetch ticker + accumulate price history.
   let lastPrice = 0;
   try {
-    const t = await client.getTicker({ category: "linear", symbol });
+    const t = await tickerSource.getTicker(symbol, { category: "linear" });
     lastPrice = Number(t.lastPrice);
   } catch (err) {
     log({

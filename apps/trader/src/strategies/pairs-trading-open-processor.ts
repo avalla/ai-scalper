@@ -11,6 +11,7 @@ import {
 } from "@ai-scalper/queueing";
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import { pairsDecide, type PairsCache } from "./pairs-trading";
@@ -36,6 +37,7 @@ export function createInMemoryPairsCacheStore(): PairsCacheStore {
 export interface PairsTradingOpenProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
+  tickerSource: TickerSource;
   alerter: WebhookAlerter;
   manageQueue: ManageQueueLike<PairsTradingManageJobData>;
   sharedState: StrategySharedState;
@@ -67,7 +69,7 @@ export async function processPairsTradingOpenTick(
   _jobData: PairsTradingOpenTickJobData,
   deps: PairsTradingOpenProcessorDeps,
 ): Promise<PairsTradingOpenTickResult> {
-  const { config, client, alerter, manageQueue, sharedState, pairsCacheStore } = deps;
+  const { config, client, tickerSource, alerter, manageQueue, sharedState, pairsCacheStore } = deps;
   const decideFn = deps.decideFn ?? pairsDecide;
   const log = deps.log ?? ((p) => console.log(JSON.stringify(p)));
   const now = (deps.now ?? Date.now)();
@@ -128,8 +130,8 @@ export async function processPairsTradingOpenTick(
   let l1Instr; let l2Instr;
   try {
     const [t1, t2, i1, i2] = await Promise.all([
-      client.getTicker({ category: "linear", symbol: leg1Symbol }),
-      client.getTicker({ category: "linear", symbol: leg2Symbol }),
+      tickerSource.getTicker(leg1Symbol, { category: "linear" }),
+      tickerSource.getTicker(leg2Symbol, { category: "linear" }),
       client.getInstrumentInfo({ category: "linear", symbol: leg1Symbol }),
       client.getInstrumentInfo({ category: "linear", symbol: leg2Symbol }),
     ]);

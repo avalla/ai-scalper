@@ -34,6 +34,16 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
   };
 }
 
+function makeTickerSource(opts: { lastPrice?: number; fail?: boolean } = {}): any {
+  return {
+    async getTicker() {
+      if (opts.fail) throw new Error("net");
+      return { lastPrice: String(opts.lastPrice ?? 115) };
+    },
+    peek() { return null; },
+  };
+}
+
 function makeShared(opts: { hasActive?: boolean } = {}): StrategySharedState {
   return {
     async hasActivePosition() { return opts.hasActive ?? false; },
@@ -50,6 +60,7 @@ describe("processLongerTfOpenTick", () => {
     const deps: LongerTfOpenProcessorDeps = {
       config: makeConfig(),
       client: {} as any,
+      tickerSource: makeTickerSource(),
       alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared({ hasActive: true }),
@@ -75,7 +86,8 @@ describe("processLongerTfOpenTick", () => {
     };
     const deps: LongerTfOpenProcessorDeps = {
       config: makeConfig(),
-      client, alerter: { async send() {} } as any,
+      client, tickerSource: makeTickerSource({ lastPrice: 115 }),
+      alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared(),
       klineCacheStore: createInMemoryKlineCacheStore(),
@@ -97,7 +109,8 @@ describe("processLongerTfOpenTick", () => {
     const client: any = { async getKlines() { throw new Error("net"); } };
     const deps: LongerTfOpenProcessorDeps = {
       config: makeConfig(),
-      client, alerter: { async send() {} } as any,
+      client, tickerSource: makeTickerSource(),
+      alerter: { async send() {} } as any,
       manageQueue: { async add() { return null; } },
       sharedState: makeShared(),
       klineCacheStore: createInMemoryKlineCacheStore(),
@@ -135,6 +148,7 @@ describe("processLongerTfManageTick", () => {
         async getPosition() { return { size: "1" }; },
         async getTicker() { return { lastPrice: "100.5" }; },
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 100.5 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: ClosedPositionLedgerEntry) { entries.push(e); } },
@@ -154,6 +168,7 @@ describe("processLongerTfManageTick", () => {
         async getTicker() { return { lastPrice: "101" }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 101 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: ClosedPositionLedgerEntry) { entries.push(e); } },
@@ -176,6 +191,7 @@ describe("processLongerTfManageTick", () => {
         async getTicker() { return { lastPrice: "101" }; },
         async createOrder() {},
       } as any,
+      tickerSource: makeTickerSource({ lastPrice: 101 }),
       alerter: { async send() {} } as any,
       sharedState: makeShared(),
       positionLedger: { async appendClosedPosition(e: ClosedPositionLedgerEntry) { entries.push(e); } },

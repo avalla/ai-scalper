@@ -21,6 +21,8 @@ import {
 } from "@ai-scalper/queueing";
 
 import { createBybitClient } from "@ai-scalper/bybit-client";
+import { createRestTickerSource, createCachedTickerSource } from "@ai-scalper/bybit-client/ticker-source";
+import { createRedisTickerCache } from "@ai-scalper/bybit-client/ws-redis-cache";
 import type { TraderConfig } from "../../trader/src/config";
 import { createWebhookAlerter } from "../../trader/src/alerts/webhook";
 import {
@@ -60,6 +62,13 @@ export async function startLlmManagedWorkerStack(deps: {
   );
 
   const client = createBybitClient();
+  const tickerSource = config.useWebSocket
+    ? createCachedTickerSource({
+        cache: createRedisTickerCache(connection),
+        fallback: client,
+        defaultMaxAgeMs: 5_000,
+      })
+    : createRestTickerSource(client);
   const alerter = createWebhookAlerter(config.alertWebhookUrl);
   const positionLedger = createPositionLedger();
   const sharedState = createLlmManagedSharedState({
@@ -72,7 +81,7 @@ export async function startLlmManagedWorkerStack(deps: {
   // ctx (BTC ticker + funding) inline.
   const collectMarketContext = async (observedAt: string) => {
     try {
-      const t = await client.getTicker({ category: "linear", symbol: "BTCUSDT" });
+      const t = await tickerSource.getTicker("BTCUSDT", { category: "linear" });
       const last = Number(t.lastPrice);
       const prev1h = Number(t.prevPrice1h);
       const fr = Number(t.fundingRate);
@@ -116,7 +125,7 @@ export async function startLlmManagedWorkerStack(deps: {
         throw new Error(`Unsupported job name: ${job.name}`);
       }
       return processLlmManagedOpenTick(job.data, {
-        config, client, alerter,
+        config, client, tickerSource, alerter,
         manageQueue,
         sharedState,
         collectMarketContext,
@@ -135,7 +144,7 @@ export async function startLlmManagedWorkerStack(deps: {
         throw new Error(`Unsupported job name: ${job.name}`);
       }
       const result = await processLlmManagedManageTick(job.data, {
-        config, client, alerter,
+        config, client, tickerSource, alerter,
         sharedState,
         positionLedger,
         collectMarketContext,
