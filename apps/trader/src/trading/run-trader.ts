@@ -3840,15 +3840,15 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       // ── Phase 2 BullMQ gates: when the per-strategy `useBullmqJobs` flag
       //    is true for the active strategy, the in-process tick becomes a
       //    no-op so the worker stack owns the trade lifecycle.
-      const useBullmqForActive = (
-        (config.strategyType === "llm-managed" && config.llmManagedUseBullmqJobs)
-        || (config.strategyType === "funding-arb" && config.fundingArbUseBullmqJobs)
-        || (config.strategyType === "longer-tf" && config.longerTfUseBullmqJobs)
-        || (config.strategyType === "bollinger-adx" && config.bollingerAdxUseBullmqJobs)
-        || (config.strategyType === "basis-arb" && config.basisArbUseBullmqJobs)
-        || (config.strategyType === "pairs-trading" && config.pairsTradingUseBullmqJobs)
-        || (config.strategyType === "calendar-spread" && config.calendarSpreadUseBullmqJobs)
-        || (config.strategyType === "ma-crossover" && config.maCrossoverUseBullmqJobs)
+      const useBullmqForActive = config.useBullmqJobs && (
+        config.strategyType === "llm-managed"
+        || config.strategyType === "funding-arb"
+        || config.strategyType === "longer-tf"
+        || config.strategyType === "bollinger-adx"
+        || config.strategyType === "basis-arb"
+        || config.strategyType === "pairs-trading"
+        || config.strategyType === "calendar-spread"
+        || config.strategyType === "ma-crossover"
       );
       if (useBullmqForActive && config.strategyType !== "llm-managed") {
         // llm-managed has its OWN logging branch below for backward compat.
@@ -3865,7 +3865,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       }
 
       // ── Strategy dispatch: non-MA strategies short-circuit the MA loop. ──
-      if (config.strategyType === "llm-managed" && config.llmManagedUseBullmqJobs) {
+      if (config.strategyType === "llm-managed" && config.useBullmqJobs) {
         // Phase 1 PoC: trades are owned by the worker stack (open-decision
         // + trade-management queues). Trader subprocess idles to keep the
         // session-job alive without duplicating LLM calls or order

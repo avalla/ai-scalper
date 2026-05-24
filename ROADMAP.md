@@ -2,6 +2,26 @@
 
 State of strategies in the bot. Each can be selected via `CONFIG_FILE=config.<name>.json bun run all`.
 
+## Configuration philosophy (env-minimal)
+
+ALL strategy / risk / execution parameters live in `apps/trader/config*.json`.
+Env vars are reserved for:
+
+- **Secrets** — `BYBIT_API_KEY`, `BYBIT_API_SECRET`, `ANTHROPIC_API_KEY`
+- **Mode / network** — `BYBIT_PAPER_TRADING`, `BYBIT_BASE_URL`,
+  `BYBIT_SCAN_BASE_URL`, `BYBIT_POSITION_MODE`, `CONFIG_FILE`
+- **Infrastructure** — `REDIS_URL`, `BYBIT_RECV_WINDOW`,
+  `BULL_BOARD_PORT`, `BULL_BOARD_BASE_PATH`,
+  `SCAN_SCHEDULE_ENABLED`, `SCAN_SCHEDULE_MINUTES`,
+  `SCAN_SCHEDULE_RUN_ON_START`
+- **Debug / ad-hoc** — `TRADER_MAX_TICKS`, `TRADER_MODE`,
+  `DRAWDOWN_HALT_COOLDOWN_MS`, `FORWARD_TRADER_STDOUT`,
+  `QUIET_HEARTBEAT_TICKS`
+
+If you need to change `BYBIT_LEVERAGE`, `STRATEGY_*`, `RISK_*`,
+`AGGRESSIVE_*`, `META_*`, `LLM_MANAGED_*`, `*_USE_BULLMQ_JOBS`, etc.,
+edit the JSON config — env overrides are gone.
+
 ## ✅ Shipped
 
 | # | Name | Config | Edge | Status | Notes |
@@ -47,30 +67,45 @@ Benefits:
   `llm-managed-open-processor.ts` + `llm-managed-manage-processor.ts`.
 - BullMQ Worker wiring (`apps/worker/src/llm-managed-workers.ts`) +
   recurring open-tick upsert + Bull Board registration.
-- New config flag `llmManagedUseBullmqJobs` (default **false**, gated env
-  `LLM_MANAGED_USE_BULLMQ_JOBS=true`). When true, the in-process
+- Config flag `runtime.useBullmqJobs` (default **false**). When true and
+  the active strategy is `llm-managed`, the in-process
   `runLlmManagedTick` loop becomes a no-op (the trader subprocess just
   idles until the session job exits — trades are owned by the workers).
 
-### Phase 2 — ✅ shipped (behind per-strategy flags, default OFF)
+> **Config simplification (2026-05):** the 8 previously-separate
+> `<strategy>UseBullmqJobs` JSON fields and their `*_USE_BULLMQ_JOBS`
+> env counterparts have been consolidated into a single
+> `runtime.useBullmqJobs` boolean. Only the strategy named in
+> `strategy.type` is gated by this flag; the 7 inactive strategies are
+> dormant anyway. Env override has been REMOVED — set it in JSON.
+
+### Phase 2 — ✅ shipped (behind a single consolidated flag, default OFF)
 
 All 7 remaining strategies now have a BullMQ trade-as-job pipeline that
 mirrors the Phase 1 llm-managed PoC: one recurring `open-decision` job and
 one `trade-management` job per live position, each completing when the
 position closes (tp / sl / convergence / external-close).
 
-Per-strategy flag → enable the BullMQ stack (legacy in-process loop becomes
-a no-op when the flag is true; behavior is byte-identical when false):
+Single flag → enable the BullMQ stack for the active strategy (legacy
+in-process loop becomes a no-op when the flag is true; behavior is
+byte-identical when false):
 
-| Strategy | Config flag | Env var | Queues |
-|---|---|---|---|
-| funding-arb | `fundingArb.useBullmqJobs` | `FUNDING_ARB_USE_BULLMQ_JOBS` | `funding-arb:open-decision` + `funding-arb:trade-management` |
-| longer-tf | `longerTf.useBullmqJobs` | `LONGER_TF_USE_BULLMQ_JOBS` | `longer-tf:open-decision` + `longer-tf:trade-management` |
-| bollinger-adx | `bollingerAdx.useBullmqJobs` | `BOLLINGER_ADX_USE_BULLMQ_JOBS` | `bollinger-adx:open-decision` + `bollinger-adx:trade-management` |
-| basis-arb | `basisArb.useBullmqJobs` | `BASIS_ARB_USE_BULLMQ_JOBS` | `basis-arb:open-decision` + `basis-arb:trade-management` |
-| pairs-trading | `pairs.useBullmqJobs` | `PAIRS_TRADING_USE_BULLMQ_JOBS` | `pairs-trading:open-decision` + `pairs-trading:trade-management` |
-| calendar-spread | `calendarSpread.useBullmqJobs` | `CALENDAR_SPREAD_USE_BULLMQ_JOBS` | `calendar-spread:open-decision` + `calendar-spread:trade-management` |
-| ma-crossover | `maCrossover.useBullmqJobs` | `MA_CROSSOVER_USE_BULLMQ_JOBS` | `ma-crossover:open-decision` + `ma-crossover:trade-management` |
+```json
+{
+  "runtime": { "useBullmqJobs": true },
+  "strategy": { "type": "funding-arb" }
+}
+```
+
+| Strategy | Queues |
+|---|---|
+| funding-arb | `funding-arb:open-decision` + `funding-arb:trade-management` |
+| longer-tf | `longer-tf:open-decision` + `longer-tf:trade-management` |
+| bollinger-adx | `bollinger-adx:open-decision` + `bollinger-adx:trade-management` |
+| basis-arb | `basis-arb:open-decision` + `basis-arb:trade-management` |
+| pairs-trading | `pairs-trading:open-decision` + `pairs-trading:trade-management` |
+| calendar-spread | `calendar-spread:open-decision` + `calendar-spread:trade-management` |
+| ma-crossover | `ma-crossover:open-decision` + `ma-crossover:trade-management` |
 
 Shared Phase 2 infrastructure:
 

@@ -26,7 +26,7 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     llmManagedModel: "claude-haiku-4-5-20251001",
     llmManagedTimeoutMs: 15000,
     llmManagedPostCutLossCooldownMs: 30 * 60_000,
-    llmManagedUseBullmqJobs: true,
+    useBullmqJobs: true,
     paperTrading: true,
     feeRoundTripBps: 11,
     walletAccountType: "UNIFIED",

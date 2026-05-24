@@ -74,7 +74,6 @@ export interface TraderConfig {
   metaIncludeAggressiveVariants: boolean;
   runtimeArtifactFlushTicks: number;
   statePersistenceEnabled: boolean;
-  // Phase 1A additions — populated but not yet wired into run-trader.ts.
   trailingStopEnabled: boolean;
   trailingStopActivationBps: number;
   trailingStopTrailBps: number;
@@ -84,6 +83,8 @@ export interface TraderConfig {
   drawdownVelocityWindowMs: number;
   drawdownVelocityMaxUsd: number;
   drawdownMaxConsecutiveLosses: number;
+  /** Cooldown after drawdown halt before resuming. Env-overridable for ad-hoc debug. */
+  drawdownHaltCooldownMs: number;
   confidenceSizingEnabled: boolean;
   confidenceSizingMinMultiplier: number;
   confidenceSizingMaxMultiplier: number;
@@ -97,9 +98,16 @@ export interface TraderConfig {
   scanExcludedSymbols: string[];
   feeRoundTripBps: number;
   requireLocalMaConfirmation: boolean;
-  // Strategy dispatch (Phase 2+: funding-arb, longer-tf, basis-arb, pairs-trading, bollinger-adx, calendar-spread, llm-managed)
+  // Strategy dispatch
   strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread" | "llm-managed";
-  // LLM-managed strategy (fully autonomous Claude-driven entry + management)
+  /**
+   * Single consolidated flag (replaces the 8 per-strategy *UseBullmqJobs
+   * flags). When true AND the active `strategyType` has a BullMQ worker
+   * stack, the in-process tick becomes a no-op and the worker owns trades.
+   * Sourced from JSON path `runtime.useBullmqJobs`, default false.
+   */
+  useBullmqJobs: boolean;
+  // LLM-managed strategy
   llmManagedAllowedSymbols: string[];
   llmManagedOpenReviewIntervalSec: number;
   llmManagedManageReviewIntervalSec: number;
@@ -111,48 +119,27 @@ export interface TraderConfig {
   llmManagedModel: string;
   llmManagedTimeoutMs: number;
   llmManagedPostCutLossCooldownMs: number;
-  /**
-   * Phase 1 PoC flag — when true, the in-process llm-managed loop in
-   * run-trader.ts becomes a no-op and the worker stack handles trades via
-   * the llmManagedOpenDecision + llmManagedTradeManagement queues.
-   * Defaults to false for backward compatibility.
-   */
-  llmManagedUseBullmqJobs: boolean;
-  /**
-   * Phase 2 — per-strategy BullMQ migration flags. When TRUE the in-process
-   * `run<Strategy>Tick` loop becomes a no-op and the trader subprocess
-   * idles; trades are owned by the worker stack via the per-strategy
-   * `open-decision` + `trade-management` queues.
-   * All default to FALSE for backward compat.
-   */
-  fundingArbUseBullmqJobs: boolean;
-  longerTfUseBullmqJobs: boolean;
-  bollingerAdxUseBullmqJobs: boolean;
-  basisArbUseBullmqJobs: boolean;
-  pairsTradingUseBullmqJobs: boolean;
-  calendarSpreadUseBullmqJobs: boolean;
-  maCrossoverUseBullmqJobs: boolean;
-  // Calendar-spread strategy parameters (perp vs dated quarterly futures)
+  // Calendar-spread strategy
   calendarPerpSymbol: string;
   calendarDatedSymbol: string;
-  calendarDatedDeliveryAt: number;       // Unix ms timestamp of dated settlement (operator-set, fallback 0)
+  calendarDatedDeliveryAt: number;
   calendarEntryThresholdBps: number;
   calendarExitThresholdBps: number;
   calendarPreSettlementCloseHours: number;
   calendarMaxNotionalUsdPerLeg: number;
   calendarPollSec: number;
-  // LLM strategy advisor (opt-in via ANTHROPIC_API_KEY)
+  // LLM advisor
   advisorEnabled: boolean;
   advisorIntervalMinutes: number;
   advisorModel: string;
-  // LLM order supervisor (opt-in pre-entry approval; supervised strategies only)
+  // LLM order supervisor
   orderSupervisorEnabled: boolean;
   orderSupervisorStrategies: string[];
   orderSupervisorMinConfidence: number;
   orderSupervisorModel: string;
   orderSupervisorTimeoutMs: number;
   orderSupervisorOnErrorBehavior: "reject" | "approve";
-  // Pairs-trading strategy parameters (cointegration mean reversion across two symbols)
+  // Pairs-trading strategy
   pairsLeg1Symbol: string;
   pairsLeg2Symbol: string;
   pairsWindowSize: number;
@@ -162,7 +149,7 @@ export interface TraderConfig {
   pairsMaxNotionalUsdPerLeg: number;
   pairsKlineInterval: string;
   pairsKlineRefreshSec: number;
-  // Bollinger + ADX regime-filter strategy parameters
+  // Bollinger + ADX
   bollingerAdxBbPeriod: number;
   bollingerAdxBbStdDev: number;
   bollingerAdxAdxPeriod: number;
@@ -172,18 +159,18 @@ export interface TraderConfig {
   bollingerAdxTakeProfitBps: number;
   bollingerAdxKlineInterval: string;
   bollingerAdxKlineRefreshSec: number;
-  // Basis-arbitrage strategy parameters (spot vs perp)
+  // Basis-arb
   basisArbEntryThresholdBps: number;
   basisArbExitThresholdBps: number;
   basisArbMaxNotionalUsd: number;
   basisArbMaxHoldMinutes: number;
-  // Funding-rate arbitrage strategy parameters
+  // Funding-arb
   fundingArbMinAbsRateBps: number;
   fundingArbEntryWindowMinutesBefore: number;
   fundingArbExitDelayMinutesAfter: number;
   fundingArbMaxLeverage: number;
   fundingArbMaxNotionalUsd: number;
-  // Longer-timeframe MA strategy parameters
+  // Longer-TF
   longerTfKlineInterval: string;
   longerTfKlineRefreshSec: number;
   longerTfFastWindow: number;
@@ -193,409 +180,230 @@ export interface TraderConfig {
   longerTfTakeProfitBps: number;
 }
 
-function resolveIncludeAggressiveVariants(
-  env: NodeJS.ProcessEnv,
-  cfgValue: boolean | undefined,
-  tradingProfile: TraderConfig["tradingProfile"],
-): boolean {
-  if (env.META_INCLUDE_AGGRESSIVE_VARIANTS !== undefined) {
-    return env.META_INCLUDE_AGGRESSIVE_VARIANTS === "true";
-  }
-  if (cfgValue !== undefined) {
-    return cfgValue;
-  }
-  return tradingProfile === "aggressive-perps";
-}
+// Convenience helpers — keep config.ts self-contained and avoid scattering
+// JSON-shape casts throughout the resolver.
+type AnyCfg = Record<string, unknown>;
+const sect = (cfg: TradingConfig, key: string): AnyCfg =>
+  ((cfg as unknown as Record<string, AnyCfg | undefined>)[key] ?? {});
 
+/**
+ * Read trader configuration.
+ *
+ * Philosophy (post env-cleanup): the JSON config files are the source of
+ * truth for ALL strategy/risk/operational parameters. Only a small
+ * whitelist of env vars is honored here — secrets, mode/network toggles,
+ * infra, and a handful of ad-hoc debug knobs. See `.env.example`.
+ */
 export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderConfig {
   const cfg = loadConfig();
+
+  const entry = sect(cfg, "entry");
+  const wallet = sect(cfg, "wallet");
+  const bybit = sect(cfg, "bybit");
+  const strategy = sect(cfg, "strategy");
+  const risk = sect(cfg, "risk");
+  const scanner = sect(cfg, "scanner");
+  const tickerFailure = sect(cfg, "tickerFailure");
+  const aggressive = sect(cfg, "aggressive");
+  const exceptional = sect(cfg, "exceptional");
+  const exitPolicy = sect(cfg, "exitPolicy");
+  const meta = sect(cfg, "meta");
+  const runtime = sect(cfg, "runtime");
+  const trailingStop = sect(cfg, "trailingStop");
+  const reconcile = sect(cfg, "reconcile");
+  const drawdown = sect(cfg, "drawdown");
+  const confidenceSizing = sect(cfg, "confidenceSizing");
+  const alerts = sect(cfg, "alerts");
+  const scanGateAutoTune = sect(cfg, "scanGateAutoTune");
+  const orderSupervisor = sect(cfg, "orderSupervisor");
+  const llmManaged = sect(cfg, "llmManaged");
+  const calendarSpread = sect(cfg, "calendarSpread");
+  const advisor = sect(cfg, "advisor");
+  const pairs = sect(cfg, "pairs");
+  const bollingerAdx = sect(cfg, "bollingerAdx");
+  const basisArb = sect(cfg, "basisArb");
+  const fundingArb = sect(cfg, "fundingArb");
+  const longerTf = sect(cfg, "longerTf");
+
+  const tradingProfile: TraderConfig["tradingProfile"] =
+    (cfg as { tradingProfile?: string }).tradingProfile === "aggressive-perps"
+      ? "aggressive-perps"
+      : "standard";
+
+  const strategyType: TraderConfig["strategyType"] = ((): TraderConfig["strategyType"] => {
+    const raw = (strategy.type as string | undefined) ?? "ma-crossover";
+    if (
+      raw === "funding-arb" || raw === "longer-tf" || raw === "ma-crossover"
+      || raw === "basis-arb" || raw === "pairs-trading" || raw === "bollinger-adx"
+      || raw === "calendar-spread" || raw === "llm-managed"
+    ) return raw;
+    return "ma-crossover";
+  })();
+
+  // Position mode: env override permitted (paper vs live can flip).
+  const bybitPositionMode: "one-way" | "hedge" =
+    env.BYBIT_POSITION_MODE === "hedge" ? "hedge"
+    : env.BYBIT_POSITION_MODE === "one-way" ? "one-way"
+    : (bybit.positionMode === "hedge" ? "hedge" : "one-way");
+
   return {
     mode: env.TRADER_MODE === "scan" ? "scan" : "trade",
-    tradingProfile:
-      env.TRADING_PROFILE === "aggressive-perps" || env.TRADING_PROFILE === "standard"
-        ? env.TRADING_PROFILE
-        : cfg.tradingProfile as TraderConfig["tradingProfile"],
-    entryExecutionMode:
-      env.ENTRY_EXECUTION_MODE === "taker" || env.ENTRY_EXECUTION_MODE === "maker-entry" || env.ENTRY_EXECUTION_MODE === "maker-preferred-with-timeout"
-        ? env.ENTRY_EXECUTION_MODE
-        : cfg.entry.executionMode as TraderConfig["entryExecutionMode"],
-    entryMakerOffsetTicks: env.ENTRY_MAKER_OFFSET_TICKS ? Number(env.ENTRY_MAKER_OFFSET_TICKS) : cfg.entry.makerOffsetTicks,
-    entryMakerPollMs: env.ENTRY_MAKER_POLL_MS ? Number(env.ENTRY_MAKER_POLL_MS) : cfg.entry.makerPollMs,
-    entryMakerTimeoutMs: env.ENTRY_MAKER_TIMEOUT_MS ? Number(env.ENTRY_MAKER_TIMEOUT_MS) : cfg.entry.makerTimeoutMs,
-    autoSizeFromWallet: env.AUTO_SIZE_FROM_WALLET ? env.AUTO_SIZE_FROM_WALLET === "true" : cfg.wallet.autoSize,
-    walletAccountType: env.WALLET_ACCOUNT_TYPE || cfg.wallet.accountType,
-    walletCoin: env.WALLET_COIN || cfg.wallet.coin,
-    walletFraction: env.WALLET_FRACTION ? Number(env.WALLET_FRACTION) : cfg.wallet.fraction,
-    walletMaxOrderUsdCap: env.WALLET_MAX_ORDER_USD_CAP
-      ? Number(env.WALLET_MAX_ORDER_USD_CAP)
-      : cfg.wallet.maxOrderUsdCap,
-    category: env.BYBIT_CATEGORY || cfg.bybit.category,
-    symbol: env.BYBIT_SYMBOL || cfg.bybit.symbol,
-    pollMs: env.BYBIT_POLL_MS ? Number(env.BYBIT_POLL_MS) : cfg.bybit.pollMs,
-    orderUsd: env.BYBIT_ORDER_USD ? Number(env.BYBIT_ORDER_USD) : cfg.bybit.orderUsd,
+    tradingProfile,
+    entryExecutionMode: (entry.executionMode as TraderConfig["entryExecutionMode"]) ?? "maker-preferred-with-timeout",
+    entryMakerOffsetTicks: (entry.makerOffsetTicks as number) ?? 0,
+    entryMakerPollMs: (entry.makerPollMs as number) ?? 250,
+    entryMakerTimeoutMs: (entry.makerTimeoutMs as number) ?? 1500,
+    autoSizeFromWallet: (wallet.autoSize as boolean) ?? false,
+    walletAccountType: (wallet.accountType as string) ?? "UNIFIED",
+    walletCoin: (wallet.coin as string) ?? "USDT",
+    walletFraction: (wallet.fraction as number) ?? 1,
+    walletMaxOrderUsdCap: (wallet.maxOrderUsdCap as number | null) ?? null,
+    category: (bybit.category as string) ?? "linear",
+    symbol: (bybit.symbol as string) ?? "BTCUSDT",
+    pollMs: (bybit.pollMs as number) ?? 1000,
+    orderUsd: (bybit.orderUsd as number) ?? 5,
     paperTrading: (env.BYBIT_PAPER_TRADING || "true") === "true",
-    fastWindow: env.STRATEGY_FAST_WINDOW ? Number(env.STRATEGY_FAST_WINDOW) : cfg.strategy.fastWindow,
-    slowWindow: env.STRATEGY_SLOW_WINDOW ? Number(env.STRATEGY_SLOW_WINDOW) : cfg.strategy.slowWindow,
-    thresholdBps: env.STRATEGY_THRESHOLD_BPS ? Number(env.STRATEGY_THRESHOLD_BPS) : cfg.strategy.thresholdBps,
-    leverage: env.BYBIT_LEVERAGE ? Number(env.BYBIT_LEVERAGE) : cfg.bybit.leverage,
-    stopLossBps: env.STRATEGY_STOP_LOSS_BPS ? Number(env.STRATEGY_STOP_LOSS_BPS) : cfg.strategy.stopLossBps,
-    takeProfitBps: env.STRATEGY_TAKE_PROFIT_BPS ? Number(env.STRATEGY_TAKE_PROFIT_BPS) : cfg.strategy.takeProfitBps,
-    maxPositionUsd: env.RISK_MAX_POSITION_USD ? Number(env.RISK_MAX_POSITION_USD) : cfg.risk.maxPositionUsd,
-    maxDailyLossUsd: env.RISK_MAX_DAILY_LOSS_USD ? Number(env.RISK_MAX_DAILY_LOSS_USD) : cfg.risk.maxDailyLossUsd,
-    maxSpreadBps: env.RISK_MAX_SPREAD_BPS ? Number(env.RISK_MAX_SPREAD_BPS) : cfg.risk.maxSpreadBps,
-    minTradeIntervalMs: env.RISK_MIN_TRADE_INTERVAL_MS ? Number(env.RISK_MIN_TRADE_INTERVAL_MS) : cfg.risk.minTradeIntervalMs,
-    riskMaxFundingRateBps: env.RISK_MAX_FUNDING_RATE_BPS ? Number(env.RISK_MAX_FUNDING_RATE_BPS) : cfg.risk.maxFundingRateBps,
-    slippageTolerancePercent: env.BYBIT_SLIPPAGE_TOLERANCE_PERCENT ? Number(env.BYBIT_SLIPPAGE_TOLERANCE_PERCENT) : cfg.bybit.slippageTolerancePercent,
+    fastWindow: (strategy.fastWindow as number) ?? 5,
+    slowWindow: (strategy.slowWindow as number) ?? 20,
+    thresholdBps: (strategy.thresholdBps as number) ?? 4,
+    leverage: (bybit.leverage as number) ?? 3,
+    stopLossBps: (strategy.stopLossBps as number) ?? 30,
+    takeProfitBps: (strategy.takeProfitBps as number) ?? 60,
+    maxPositionUsd: (risk.maxPositionUsd as number) ?? 100,
+    maxDailyLossUsd: (risk.maxDailyLossUsd as number) ?? 50,
+    maxSpreadBps: (risk.maxSpreadBps as number) ?? 8,
+    minTradeIntervalMs: (risk.minTradeIntervalMs as number) ?? 15000,
+    riskMaxFundingRateBps: (risk.maxFundingRateBps as number) ?? 15,
+    slippageTolerancePercent: (bybit.slippageTolerancePercent as number) ?? 0.1,
     maxTicks: Number(env.TRADER_MAX_TICKS || "0"),
-    tradeScanRefreshMs: env.TRADE_SCAN_REFRESH_MS ? Number(env.TRADE_SCAN_REFRESH_MS) : cfg.scanner.refreshMs,
-    tradeMinSetupScore: env.TRADE_MIN_SETUP_SCORE ? Number(env.TRADE_MIN_SETUP_SCORE) : cfg.scanner.minSetupScore,
-    tradeMinSetupNetEdgeBps: env.TRADE_MIN_SETUP_NET_EDGE_BPS ? Number(env.TRADE_MIN_SETUP_NET_EDGE_BPS) : cfg.scanner.minSetupNetEdgeBps,
-    aggressiveAllowedSymbols: env.AGGRESSIVE_ALLOWED_SYMBOLS
-      ? env.AGGRESSIVE_ALLOWED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
-      : cfg.aggressive.allowedSymbols,
-    aggressiveRequireScanCandidate: env.AGGRESSIVE_REQUIRE_SCAN_CANDIDATE
-      ? env.AGGRESSIVE_REQUIRE_SCAN_CANDIDATE === "true"
-      : cfg.aggressive.requireScanCandidate,
-    aggressiveScanCandidatesPath: env.AGGRESSIVE_SCAN_CANDIDATES_PATH || cfg.aggressive.scanCandidatesPath,
-    aggressiveScanLatestPath: env.AGGRESSIVE_SCAN_LATEST_PATH || cfg.aggressive.scanLatestPath,
-    aggressiveScanMaxAgeMinutes: env.AGGRESSIVE_SCAN_MAX_AGE_MINUTES ? Number(env.AGGRESSIVE_SCAN_MAX_AGE_MINUTES) : cfg.aggressive.scanMaxAgeMinutes,
-    tradeCandidateSymbols: env.TRADE_CANDIDATE_SYMBOLS
-      ? env.TRADE_CANDIDATE_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
-      : cfg.scanner.candidateSymbols,
-    tickerFailureCooldownTicks: env.TICKER_FAILURE_COOLDOWN_TICKS ? Number(env.TICKER_FAILURE_COOLDOWN_TICKS) : cfg.tickerFailure.cooldownTicks,
-    tickerFailureThreshold: env.TICKER_FAILURE_THRESHOLD ? Number(env.TICKER_FAILURE_THRESHOLD) : cfg.tickerFailure.threshold,
-    aggressiveMaxLeverage: env.AGGRESSIVE_MAX_LEVERAGE ? Number(env.AGGRESSIVE_MAX_LEVERAGE) : cfg.aggressive.maxLeverage,
-    aggressiveMaxFundingRateBps: env.AGGRESSIVE_MAX_FUNDING_RATE_BPS ? Number(env.AGGRESSIVE_MAX_FUNDING_RATE_BPS) : cfg.aggressive.maxFundingRateBps,
-    aggressiveMaxLossPerTradeUsd: env.AGGRESSIVE_MAX_LOSS_PER_TRADE_USD ? Number(env.AGGRESSIVE_MAX_LOSS_PER_TRADE_USD) : cfg.aggressive.maxLossPerTradeUsd,
-    aggressiveMinEstimatedLiqBufferBps: env.AGGRESSIVE_MIN_ESTIMATED_LIQ_BUFFER_BPS ? Number(env.AGGRESSIVE_MIN_ESTIMATED_LIQ_BUFFER_BPS) : cfg.aggressive.minEstimatedLiqBufferBps,
-    exceptionalLeverageEnabled: env.EXCEPTIONAL_LEVERAGE_ENABLED
-      ? env.EXCEPTIONAL_LEVERAGE_ENABLED === "true"
-      : cfg.exceptional.enabled,
-    exceptionalAllowedSymbols: env.EXCEPTIONAL_ALLOWED_SYMBOLS
-      ? env.EXCEPTIONAL_ALLOWED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
-      : cfg.exceptional.allowedSymbols,
-    exceptionalLeverage: env.EXCEPTIONAL_LEVERAGE ? Number(env.EXCEPTIONAL_LEVERAGE) : cfg.exceptional.leverage,
-    exceptionalMaxSpreadBps: env.EXCEPTIONAL_MAX_SPREAD_BPS ? Number(env.EXCEPTIONAL_MAX_SPREAD_BPS) : cfg.exceptional.maxSpreadBps,
-    exceptionalMaxFundingRateBps: env.EXCEPTIONAL_MAX_FUNDING_RATE_BPS ? Number(env.EXCEPTIONAL_MAX_FUNDING_RATE_BPS) : cfg.exceptional.maxFundingRateBps,
-    exceptionalMinHourlyMoveBps: env.EXCEPTIONAL_MIN_HOURLY_MOVE_BPS ? Number(env.EXCEPTIONAL_MIN_HOURLY_MOVE_BPS) : cfg.exceptional.minHourlyMoveBps,
-    exceptionalMinMinuteRangeBps: env.EXCEPTIONAL_MIN_MINUTE_RANGE_BPS ? Number(env.EXCEPTIONAL_MIN_MINUTE_RANGE_BPS) : cfg.exceptional.minMinuteRangeBps,
-    exceptionalMinNetEdgeBps: env.EXCEPTIONAL_MIN_NET_EDGE_BPS ? Number(env.EXCEPTIONAL_MIN_NET_EDGE_BPS) : cfg.exceptional.minNetEdgeBps,
-    exitPolicyMode: cfg.exitPolicy.mode as "exchange-native" | "logical",
-    exitPolicySafetyDelayMs: cfg.exitPolicy.safetyDelayMs,
-    exitPolicySafetyStopBps: cfg.exitPolicy.safetyStopBps,
-    bybitPositionMode: ((): "one-way" | "hedge" => {
-      if (env.BYBIT_POSITION_MODE === "hedge") return "hedge";
-      if (env.BYBIT_POSITION_MODE === "one-way") return "one-way";
-      const cfgMode = (cfg as { bybit?: { positionMode?: string } }).bybit?.positionMode;
-      return cfgMode === "hedge" ? "hedge" : "one-way";
-    })(),
-    metaEnabled: env.META_ENABLED ? env.META_ENABLED === "true" : ((cfg as { meta?: { enabled?: boolean } }).meta?.enabled ?? false),
-    metaWarmupMinTrades: env.META_WARMUP_MIN_TRADES
-      ? Number(env.META_WARMUP_MIN_TRADES)
-      : ((cfg as { meta?: { warmupMinTrades?: number } }).meta?.warmupMinTrades ?? 5),
-    metaPnlWindowSize: env.META_PNL_WINDOW_SIZE
-      ? Number(env.META_PNL_WINDOW_SIZE)
-      : ((cfg as { meta?: { pnlWindowSize?: number } }).meta?.pnlWindowSize ?? 50),
-    metaIncludeAggressiveVariants: resolveIncludeAggressiveVariants(
-      env,
-      (cfg as { meta?: { includeAggressiveVariants?: boolean } }).meta?.includeAggressiveVariants,
-      (env.TRADING_PROFILE === "aggressive-perps" || env.TRADING_PROFILE === "standard"
-        ? env.TRADING_PROFILE
-        : cfg.tradingProfile as TraderConfig["tradingProfile"]),
-    ),
-    runtimeArtifactFlushTicks: env.RUNTIME_ARTIFACT_FLUSH_TICKS
-      ? Number(env.RUNTIME_ARTIFACT_FLUSH_TICKS)
-      : ((cfg as { runtime?: { artifactFlushTicks?: number } }).runtime?.artifactFlushTicks ?? 30),
-    statePersistenceEnabled: env.STATE_PERSISTENCE_ENABLED
-      ? env.STATE_PERSISTENCE_ENABLED === "true"
-      : ((cfg as { runtime?: { statePersistenceEnabled?: boolean } }).runtime?.statePersistenceEnabled ?? false),
-    // ---------- Phase 1A ----------
-    trailingStopEnabled: env.TRAILING_STOP_ENABLED
-      ? env.TRAILING_STOP_ENABLED === "true"
-      : ((cfg as { trailingStop?: { enabled?: boolean } }).trailingStop?.enabled ?? false),
-    trailingStopActivationBps: env.TRAILING_STOP_ACTIVATION_BPS
-      ? Number(env.TRAILING_STOP_ACTIVATION_BPS)
-      : ((cfg as { trailingStop?: { activationBps?: number } }).trailingStop?.activationBps ?? 30),
-    trailingStopTrailBps: env.TRAILING_STOP_TRAIL_BPS
-      ? Number(env.TRAILING_STOP_TRAIL_BPS)
-      : ((cfg as { trailingStop?: { trailBps?: number } }).trailingStop?.trailBps ?? 15),
-    positionReconcileIntervalTicks: env.POSITION_RECONCILE_INTERVAL_TICKS
-      ? Number(env.POSITION_RECONCILE_INTERVAL_TICKS)
-      : ((cfg as { reconcile?: { intervalTicks?: number } }).reconcile?.intervalTicks ?? 30),
-    setTradingStopRetryMax: env.SET_TRADING_STOP_RETRY_MAX
-      ? Number(env.SET_TRADING_STOP_RETRY_MAX)
-      : ((cfg as { reconcile?: { setTradingStopRetryMax?: number } }).reconcile?.setTradingStopRetryMax ?? 3),
-    setTradingStopRetryDelayMs: env.SET_TRADING_STOP_RETRY_DELAY_MS
-      ? Number(env.SET_TRADING_STOP_RETRY_DELAY_MS)
-      : ((cfg as { reconcile?: { setTradingStopRetryDelayMs?: number } }).reconcile?.setTradingStopRetryDelayMs ?? 500),
-    drawdownVelocityWindowMs: env.DRAWDOWN_VELOCITY_WINDOW_MS
-      ? Number(env.DRAWDOWN_VELOCITY_WINDOW_MS)
-      : ((cfg as { drawdown?: { velocityWindowMs?: number } }).drawdown?.velocityWindowMs ?? 3_600_000),
-    drawdownVelocityMaxUsd: env.DRAWDOWN_VELOCITY_MAX_USD
-      ? Number(env.DRAWDOWN_VELOCITY_MAX_USD)
-      : ((cfg as { drawdown?: { velocityMaxUsd?: number } }).drawdown?.velocityMaxUsd ?? 30),
-    drawdownMaxConsecutiveLosses: env.DRAWDOWN_MAX_CONSECUTIVE_LOSSES
-      ? Number(env.DRAWDOWN_MAX_CONSECUTIVE_LOSSES)
-      : ((cfg as { drawdown?: { maxConsecutiveLosses?: number } }).drawdown?.maxConsecutiveLosses ?? 5),
-    confidenceSizingEnabled: env.CONFIDENCE_SIZING_ENABLED
-      ? env.CONFIDENCE_SIZING_ENABLED === "true"
-      : ((cfg as { confidenceSizing?: { enabled?: boolean } }).confidenceSizing?.enabled ?? false),
-    confidenceSizingMinMultiplier: env.CONFIDENCE_SIZING_MIN_MULTIPLIER
-      ? Number(env.CONFIDENCE_SIZING_MIN_MULTIPLIER)
-      : ((cfg as { confidenceSizing?: { minMultiplier?: number } }).confidenceSizing?.minMultiplier ?? 0.5),
-    confidenceSizingMaxMultiplier: env.CONFIDENCE_SIZING_MAX_MULTIPLIER
-      ? Number(env.CONFIDENCE_SIZING_MAX_MULTIPLIER)
-      : ((cfg as { confidenceSizing?: { maxMultiplier?: number } }).confidenceSizing?.maxMultiplier ?? 2.0),
-    bandit_halfLifeDays: env.BANDIT_HALF_LIFE_DAYS
-      ? Number(env.BANDIT_HALF_LIFE_DAYS)
-      : ((cfg as { meta?: { halfLifeDays?: number } }).meta?.halfLifeDays ?? 0),
-    alertWebhookUrl: env.ALERT_WEBHOOK_URL ?? ((cfg as { alerts?: { webhookUrl?: string } }).alerts?.webhookUrl ?? ""),
-    scanGateAutoTuneEnabled: env.SCAN_GATE_AUTO_TUNE_ENABLED
-      ? env.SCAN_GATE_AUTO_TUNE_ENABLED === "true"
-      : ((cfg as { scanGateAutoTune?: { enabled?: boolean } }).scanGateAutoTune?.enabled ?? false),
+    tradeScanRefreshMs: (scanner.refreshMs as number) ?? 60000,
+    tradeMinSetupScore: (scanner.minSetupScore as number) ?? 45,
+    tradeMinSetupNetEdgeBps: (scanner.minSetupNetEdgeBps as number) ?? 15,
+    aggressiveAllowedSymbols: (aggressive.allowedSymbols as string[]) ?? [],
+    aggressiveRequireScanCandidate: (aggressive.requireScanCandidate as boolean) ?? false,
+    aggressiveScanCandidatesPath: (aggressive.scanCandidatesPath as string) ?? "apps/trader/data/backtest-candidates.json",
+    aggressiveScanLatestPath: (aggressive.scanLatestPath as string) ?? "apps/trader/data/scan-latest.json",
+    aggressiveScanMaxAgeMinutes: (aggressive.scanMaxAgeMinutes as number) ?? 30,
+    tradeCandidateSymbols: (scanner.candidateSymbols as string[]) ?? [],
+    tickerFailureCooldownTicks: (tickerFailure.cooldownTicks as number) ?? 20,
+    tickerFailureThreshold: (tickerFailure.threshold as number) ?? 3,
+    aggressiveMaxLeverage: (aggressive.maxLeverage as number) ?? 50,
+    aggressiveMaxFundingRateBps: (aggressive.maxFundingRateBps as number) ?? 8,
+    aggressiveMaxLossPerTradeUsd: (aggressive.maxLossPerTradeUsd as number) ?? 8,
+    aggressiveMinEstimatedLiqBufferBps: (aggressive.minEstimatedLiqBufferBps as number) ?? 80,
+    exceptionalLeverageEnabled: (exceptional.enabled as boolean) ?? false,
+    exceptionalAllowedSymbols: (exceptional.allowedSymbols as string[]) ?? [],
+    exceptionalLeverage: (exceptional.leverage as number) ?? 100,
+    exceptionalMaxSpreadBps: (exceptional.maxSpreadBps as number) ?? 0.5,
+    exceptionalMaxFundingRateBps: (exceptional.maxFundingRateBps as number) ?? 2,
+    exceptionalMinHourlyMoveBps: (exceptional.minHourlyMoveBps as number) ?? 100,
+    exceptionalMinMinuteRangeBps: (exceptional.minMinuteRangeBps as number) ?? 20,
+    exceptionalMinNetEdgeBps: (exceptional.minNetEdgeBps as number) ?? 10,
+    exitPolicyMode: ((exitPolicy.mode as string) === "exchange-native" ? "exchange-native" : "logical"),
+    exitPolicySafetyDelayMs: (exitPolicy.safetyDelayMs as number) ?? 5000,
+    exitPolicySafetyStopBps: (exitPolicy.safetyStopBps as number) ?? 60,
+    bybitPositionMode,
+    metaEnabled: (meta.enabled as boolean) ?? false,
+    metaWarmupMinTrades: (meta.warmupMinTrades as number) ?? 5,
+    metaPnlWindowSize: (meta.pnlWindowSize as number) ?? 50,
+    metaIncludeAggressiveVariants:
+      (meta.includeAggressiveVariants as boolean | undefined)
+      ?? (tradingProfile === "aggressive-perps"),
+    runtimeArtifactFlushTicks: (runtime.artifactFlushTicks as number) ?? 30,
+    statePersistenceEnabled: (runtime.statePersistenceEnabled as boolean) ?? false,
+    trailingStopEnabled: (trailingStop.enabled as boolean) ?? false,
+    trailingStopActivationBps: (trailingStop.activationBps as number) ?? 30,
+    trailingStopTrailBps: (trailingStop.trailBps as number) ?? 15,
+    positionReconcileIntervalTicks: (reconcile.intervalTicks as number) ?? 30,
+    setTradingStopRetryMax: (reconcile.setTradingStopRetryMax as number) ?? 3,
+    setTradingStopRetryDelayMs: (reconcile.setTradingStopRetryDelayMs as number) ?? 500,
+    drawdownVelocityWindowMs: (drawdown.velocityWindowMs as number) ?? 3_600_000,
+    drawdownVelocityMaxUsd: (drawdown.velocityMaxUsd as number) ?? 30,
+    drawdownMaxConsecutiveLosses: (drawdown.maxConsecutiveLosses as number) ?? 5,
+    drawdownHaltCooldownMs: env.DRAWDOWN_HALT_COOLDOWN_MS
+      ? Number(env.DRAWDOWN_HALT_COOLDOWN_MS)
+      : ((drawdown.haltCooldownMs as number | undefined) ?? 3_600_000),
+    confidenceSizingEnabled: (confidenceSizing.enabled as boolean) ?? false,
+    confidenceSizingMinMultiplier: (confidenceSizing.minMultiplier as number) ?? 0.5,
+    confidenceSizingMaxMultiplier: (confidenceSizing.maxMultiplier as number) ?? 2.0,
+    bandit_halfLifeDays: (meta.halfLifeDays as number) ?? 0,
+    alertWebhookUrl: (alerts.webhookUrl as string) ?? "",
+    scanGateAutoTuneEnabled: (scanGateAutoTune.enabled as boolean) ?? false,
     scanGateAutoTunePercentile: ((): 50 | 75 | 90 => {
-      const v = env.SCAN_GATE_AUTO_TUNE_PERCENTILE
-        ? Number(env.SCAN_GATE_AUTO_TUNE_PERCENTILE)
-        : ((cfg as { scanGateAutoTune?: { percentile?: number } }).scanGateAutoTune?.percentile ?? 75);
+      const v = (scanGateAutoTune.percentile as number | undefined) ?? 75;
       return v === 50 ? 50 : v === 90 ? 90 : 75;
     })(),
-    scanGateAutoTuneFallbackBps: env.SCAN_GATE_AUTO_TUNE_FALLBACK_BPS
-      ? Number(env.SCAN_GATE_AUTO_TUNE_FALLBACK_BPS)
-      : ((cfg as { scanGateAutoTune?: { fallbackBps?: number } }).scanGateAutoTune?.fallbackBps ?? 15),
-    scanMinOpenInterestUsd: env.SCAN_MIN_OPEN_INTEREST_USD
-      ? Number(env.SCAN_MIN_OPEN_INTEREST_USD)
-      : ((cfg as { scanner?: { minOpenInterestUsd?: number } }).scanner?.minOpenInterestUsd ?? 0),
-    scanMinListingAgeDays: env.SCAN_MIN_LISTING_AGE_DAYS
-      ? Number(env.SCAN_MIN_LISTING_AGE_DAYS)
-      : ((cfg as { scanner?: { minListingAgeDays?: number } }).scanner?.minListingAgeDays ?? 0),
-    scanExcludedSymbols: env.SCAN_EXCLUDED_SYMBOLS
-      ? env.SCAN_EXCLUDED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
-      : ((cfg as { scanner?: { excludedSymbols?: string[] } }).scanner?.excludedSymbols ?? []),
-    feeRoundTripBps: env.BYBIT_FEE_ROUND_TRIP_BPS
-      ? Number(env.BYBIT_FEE_ROUND_TRIP_BPS)
-      : ((cfg as { bybit?: { feeRoundTripBps?: number } }).bybit?.feeRoundTripBps ?? 0),
-    requireLocalMaConfirmation: env.REQUIRE_LOCAL_MA_CONFIRMATION
-      ? env.REQUIRE_LOCAL_MA_CONFIRMATION === "true"
-      : ((cfg as { strategy?: { requireLocalMaConfirmation?: boolean } }).strategy?.requireLocalMaConfirmation ?? true),
-    strategyType: ((): TraderConfig["strategyType"] => {
-      const raw = env.STRATEGY_TYPE
-        ?? (cfg as { strategy?: { type?: string } }).strategy?.type
-        ?? "ma-crossover";
-      if (
-        raw === "funding-arb"
-        || raw === "longer-tf"
-        || raw === "ma-crossover"
-        || raw === "basis-arb"
-        || raw === "pairs-trading"
-        || raw === "bollinger-adx"
-        || raw === "calendar-spread"
-        || raw === "llm-managed"
-      ) return raw;
-      return "ma-crossover";
-    })(),
-    llmManagedAllowedSymbols: env.LLM_MANAGED_ALLOWED_SYMBOLS
-      ? env.LLM_MANAGED_ALLOWED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
-      : ((cfg as { llmManaged?: { allowedSymbols?: string[] } }).llmManaged?.allowedSymbols
-        ?? ["BTCUSDT", "ETHUSDT", "SOLUSDT"]),
-    llmManagedOpenReviewIntervalSec: env.LLM_MANAGED_OPEN_REVIEW_INTERVAL_SEC
-      ? Number(env.LLM_MANAGED_OPEN_REVIEW_INTERVAL_SEC)
-      : ((cfg as { llmManaged?: { openReviewIntervalSec?: number } }).llmManaged?.openReviewIntervalSec ?? 600),
-    llmManagedManageReviewIntervalSec: env.LLM_MANAGED_MANAGE_REVIEW_INTERVAL_SEC
-      ? Number(env.LLM_MANAGED_MANAGE_REVIEW_INTERVAL_SEC)
-      : ((cfg as { llmManaged?: { manageReviewIntervalSec?: number } }).llmManaged?.manageReviewIntervalSec ?? 180),
-    llmManagedMaxNotionalUsd: env.LLM_MANAGED_MAX_NOTIONAL_USD
-      ? Number(env.LLM_MANAGED_MAX_NOTIONAL_USD)
-      : ((cfg as { llmManaged?: { maxNotionalUsd?: number } }).llmManaged?.maxNotionalUsd ?? 100),
-    llmManagedMaxLeverage: env.LLM_MANAGED_MAX_LEVERAGE
-      ? Number(env.LLM_MANAGED_MAX_LEVERAGE)
-      : ((cfg as { llmManaged?: { maxLeverage?: number } }).llmManaged?.maxLeverage ?? 10),
-    llmManagedMaxHoldHours: env.LLM_MANAGED_MAX_HOLD_HOURS
-      ? Number(env.LLM_MANAGED_MAX_HOLD_HOURS)
-      : ((cfg as { llmManaged?: { maxHoldHours?: number } }).llmManaged?.maxHoldHours ?? 24),
-    llmManagedMaxAbsoluteLossUsd: env.LLM_MANAGED_MAX_ABSOLUTE_LOSS_USD
-      ? Number(env.LLM_MANAGED_MAX_ABSOLUTE_LOSS_USD)
-      : ((cfg as { llmManaged?: { maxAbsoluteLossUsd?: number } }).llmManaged?.maxAbsoluteLossUsd ?? 20),
-    llmManagedHedgeMaxNotionalUsd: env.LLM_MANAGED_HEDGE_MAX_NOTIONAL_USD
-      ? Number(env.LLM_MANAGED_HEDGE_MAX_NOTIONAL_USD)
-      : ((cfg as { llmManaged?: { hedgeMaxNotionalUsd?: number } }).llmManaged?.hedgeMaxNotionalUsd ?? 100),
-    llmManagedModel: env.LLM_MANAGED_MODEL
-      ?? ((cfg as { llmManaged?: { model?: string } }).llmManaged?.model ?? "claude-haiku-4-5-20251001"),
-    llmManagedTimeoutMs: env.LLM_MANAGED_TIMEOUT_MS
-      ? Number(env.LLM_MANAGED_TIMEOUT_MS)
-      : ((cfg as { llmManaged?: { timeoutMs?: number } }).llmManaged?.timeoutMs ?? 15000),
-    llmManagedPostCutLossCooldownMs: env.LLM_MANAGED_POST_CUT_LOSS_COOLDOWN_MS
-      ? Number(env.LLM_MANAGED_POST_CUT_LOSS_COOLDOWN_MS)
-      : ((cfg as { llmManaged?: { postCutLossCooldownMs?: number } }).llmManaged?.postCutLossCooldownMs ?? 1800000),
-    llmManagedUseBullmqJobs: env.LLM_MANAGED_USE_BULLMQ_JOBS
-      ? env.LLM_MANAGED_USE_BULLMQ_JOBS === "true"
-      : ((cfg as { llmManaged?: { useBullmqJobs?: boolean } }).llmManaged?.useBullmqJobs ?? false),
-    fundingArbUseBullmqJobs: env.FUNDING_ARB_USE_BULLMQ_JOBS
-      ? env.FUNDING_ARB_USE_BULLMQ_JOBS === "true"
-      : ((cfg as { fundingArb?: { useBullmqJobs?: boolean } }).fundingArb?.useBullmqJobs ?? false),
-    longerTfUseBullmqJobs: env.LONGER_TF_USE_BULLMQ_JOBS
-      ? env.LONGER_TF_USE_BULLMQ_JOBS === "true"
-      : ((cfg as { longerTf?: { useBullmqJobs?: boolean } }).longerTf?.useBullmqJobs ?? false),
-    bollingerAdxUseBullmqJobs: env.BOLLINGER_ADX_USE_BULLMQ_JOBS
-      ? env.BOLLINGER_ADX_USE_BULLMQ_JOBS === "true"
-      : ((cfg as { bollingerAdx?: { useBullmqJobs?: boolean } }).bollingerAdx?.useBullmqJobs ?? false),
-    basisArbUseBullmqJobs: env.BASIS_ARB_USE_BULLMQ_JOBS
-      ? env.BASIS_ARB_USE_BULLMQ_JOBS === "true"
-      : ((cfg as { basisArb?: { useBullmqJobs?: boolean } }).basisArb?.useBullmqJobs ?? false),
-    pairsTradingUseBullmqJobs: env.PAIRS_TRADING_USE_BULLMQ_JOBS
-      ? env.PAIRS_TRADING_USE_BULLMQ_JOBS === "true"
-      : ((cfg as { pairs?: { useBullmqJobs?: boolean } }).pairs?.useBullmqJobs ?? false),
-    calendarSpreadUseBullmqJobs: env.CALENDAR_SPREAD_USE_BULLMQ_JOBS
-      ? env.CALENDAR_SPREAD_USE_BULLMQ_JOBS === "true"
-      : ((cfg as { calendarSpread?: { useBullmqJobs?: boolean } }).calendarSpread?.useBullmqJobs ?? false),
-    maCrossoverUseBullmqJobs: env.MA_CROSSOVER_USE_BULLMQ_JOBS
-      ? env.MA_CROSSOVER_USE_BULLMQ_JOBS === "true"
-      : ((cfg as { maCrossover?: { useBullmqJobs?: boolean } }).maCrossover?.useBullmqJobs ?? false),
-    calendarPerpSymbol: env.CALENDAR_PERP_SYMBOL
-      ?? ((cfg as { calendarSpread?: { perpSymbol?: string } }).calendarSpread?.perpSymbol ?? "BTCUSDT"),
-    calendarDatedSymbol: env.CALENDAR_DATED_SYMBOL
-      ?? ((cfg as { calendarSpread?: { datedSymbol?: string } }).calendarSpread?.datedSymbol ?? ""),
-    calendarDatedDeliveryAt: env.CALENDAR_DATED_DELIVERY_AT
-      ? Number(env.CALENDAR_DATED_DELIVERY_AT)
-      : ((cfg as { calendarSpread?: { datedDeliveryAt?: number } }).calendarSpread?.datedDeliveryAt ?? 0),
-    calendarEntryThresholdBps: env.CALENDAR_ENTRY_THRESHOLD_BPS
-      ? Number(env.CALENDAR_ENTRY_THRESHOLD_BPS)
-      : ((cfg as { calendarSpread?: { entryThresholdBps?: number } }).calendarSpread?.entryThresholdBps ?? 30),
-    calendarExitThresholdBps: env.CALENDAR_EXIT_THRESHOLD_BPS
-      ? Number(env.CALENDAR_EXIT_THRESHOLD_BPS)
-      : ((cfg as { calendarSpread?: { exitThresholdBps?: number } }).calendarSpread?.exitThresholdBps ?? 5),
-    calendarPreSettlementCloseHours: env.CALENDAR_PRE_SETTLEMENT_CLOSE_HOURS
-      ? Number(env.CALENDAR_PRE_SETTLEMENT_CLOSE_HOURS)
-      : ((cfg as { calendarSpread?: { preSettlementCloseHours?: number } }).calendarSpread?.preSettlementCloseHours ?? 24),
-    calendarMaxNotionalUsdPerLeg: env.CALENDAR_MAX_NOTIONAL_USD_PER_LEG
-      ? Number(env.CALENDAR_MAX_NOTIONAL_USD_PER_LEG)
-      : ((cfg as { calendarSpread?: { maxNotionalUsdPerLeg?: number } }).calendarSpread?.maxNotionalUsdPerLeg ?? 200),
-    calendarPollSec: env.CALENDAR_POLL_SEC
-      ? Number(env.CALENDAR_POLL_SEC)
-      : ((cfg as { calendarSpread?: { pollSec?: number } }).calendarSpread?.pollSec ?? 60),
-    advisorEnabled: env.ADVISOR_ENABLED
-      ? env.ADVISOR_ENABLED === "true"
-      : ((cfg as { advisor?: { enabled?: boolean } }).advisor?.enabled ?? false),
-    advisorIntervalMinutes: env.ADVISOR_INTERVAL_MINUTES
-      ? Number(env.ADVISOR_INTERVAL_MINUTES)
-      : ((cfg as { advisor?: { intervalMinutes?: number } }).advisor?.intervalMinutes ?? 30),
-    advisorModel: env.ADVISOR_MODEL
-      ?? ((cfg as { advisor?: { model?: string } }).advisor?.model ?? "claude-haiku-4-5-20251001"),
-    orderSupervisorEnabled: env.ORDER_SUPERVISOR_ENABLED
-      ? env.ORDER_SUPERVISOR_ENABLED === "true"
-      : ((cfg as { orderSupervisor?: { enabled?: boolean } }).orderSupervisor?.enabled ?? false),
-    orderSupervisorStrategies: env.ORDER_SUPERVISOR_STRATEGIES
-      ? env.ORDER_SUPERVISOR_STRATEGIES.split(",").map((s) => s.trim()).filter(Boolean)
-      : ((cfg as { orderSupervisor?: { strategies?: string[] } }).orderSupervisor?.strategies
-        ?? ["funding-arb", "basis-arb", "pairs-trading", "calendar-spread"]),
-    orderSupervisorMinConfidence: env.ORDER_SUPERVISOR_MIN_CONFIDENCE
-      ? Number(env.ORDER_SUPERVISOR_MIN_CONFIDENCE)
-      : ((cfg as { orderSupervisor?: { minConfidence?: number } }).orderSupervisor?.minConfidence ?? 0.5),
-    orderSupervisorModel: env.ORDER_SUPERVISOR_MODEL
-      ?? ((cfg as { orderSupervisor?: { model?: string } }).orderSupervisor?.model ?? "claude-haiku-4-5-20251001"),
-    orderSupervisorTimeoutMs: env.ORDER_SUPERVISOR_TIMEOUT_MS
-      ? Number(env.ORDER_SUPERVISOR_TIMEOUT_MS)
-      : ((cfg as { orderSupervisor?: { timeoutMs?: number } }).orderSupervisor?.timeoutMs ?? 8000),
-    orderSupervisorOnErrorBehavior: ((): "reject" | "approve" => {
-      const raw = env.ORDER_SUPERVISOR_ON_ERROR_BEHAVIOR
-        ?? ((cfg as { orderSupervisor?: { onErrorBehavior?: string } }).orderSupervisor?.onErrorBehavior ?? "reject");
-      return raw === "approve" ? "approve" : "reject";
-    })(),
-    basisArbEntryThresholdBps: env.BASIS_ARB_ENTRY_THRESHOLD_BPS
-      ? Number(env.BASIS_ARB_ENTRY_THRESHOLD_BPS)
-      : ((cfg as { basisArb?: { entryThresholdBps?: number } }).basisArb?.entryThresholdBps ?? 8),
-    basisArbExitThresholdBps: env.BASIS_ARB_EXIT_THRESHOLD_BPS
-      ? Number(env.BASIS_ARB_EXIT_THRESHOLD_BPS)
-      : ((cfg as { basisArb?: { exitThresholdBps?: number } }).basisArb?.exitThresholdBps ?? 2),
-    basisArbMaxNotionalUsd: env.BASIS_ARB_MAX_NOTIONAL_USD
-      ? Number(env.BASIS_ARB_MAX_NOTIONAL_USD)
-      : ((cfg as { basisArb?: { maxNotionalUsd?: number } }).basisArb?.maxNotionalUsd ?? 100),
-    basisArbMaxHoldMinutes: env.BASIS_ARB_MAX_HOLD_MINUTES
-      ? Number(env.BASIS_ARB_MAX_HOLD_MINUTES)
-      : ((cfg as { basisArb?: { maxHoldMinutes?: number } }).basisArb?.maxHoldMinutes ?? 240),
-    fundingArbMinAbsRateBps: env.FUNDING_ARB_MIN_ABS_RATE_BPS
-      ? Number(env.FUNDING_ARB_MIN_ABS_RATE_BPS)
-      : ((cfg as { fundingArb?: { minAbsRateBps?: number } }).fundingArb?.minAbsRateBps ?? 5),
-    fundingArbEntryWindowMinutesBefore: env.FUNDING_ARB_ENTRY_WINDOW_MINUTES_BEFORE
-      ? Number(env.FUNDING_ARB_ENTRY_WINDOW_MINUTES_BEFORE)
-      : ((cfg as { fundingArb?: { entryWindowMinutesBefore?: number } }).fundingArb?.entryWindowMinutesBefore ?? 5),
-    fundingArbExitDelayMinutesAfter: env.FUNDING_ARB_EXIT_DELAY_MINUTES_AFTER
-      ? Number(env.FUNDING_ARB_EXIT_DELAY_MINUTES_AFTER)
-      : ((cfg as { fundingArb?: { exitDelayMinutesAfter?: number } }).fundingArb?.exitDelayMinutesAfter ?? 2),
-    fundingArbMaxLeverage: env.FUNDING_ARB_MAX_LEVERAGE
-      ? Number(env.FUNDING_ARB_MAX_LEVERAGE)
-      : ((cfg as { fundingArb?: { maxLeverage?: number } }).fundingArb?.maxLeverage ?? 5),
-    fundingArbMaxNotionalUsd: env.FUNDING_ARB_MAX_NOTIONAL_USD
-      ? Number(env.FUNDING_ARB_MAX_NOTIONAL_USD)
-      : ((cfg as { fundingArb?: { maxNotionalUsd?: number } }).fundingArb?.maxNotionalUsd ?? 100),
-    longerTfKlineInterval: env.LONGER_TF_KLINE_INTERVAL
-      ?? ((cfg as { longerTf?: { klineInterval?: string } }).longerTf?.klineInterval ?? "15"),
-    longerTfKlineRefreshSec: env.LONGER_TF_KLINE_REFRESH_SEC
-      ? Number(env.LONGER_TF_KLINE_REFRESH_SEC)
-      : ((cfg as { longerTf?: { klineRefreshSec?: number } }).longerTf?.klineRefreshSec ?? 60),
-    longerTfFastWindow: env.LONGER_TF_FAST_WINDOW
-      ? Number(env.LONGER_TF_FAST_WINDOW)
-      : ((cfg as { longerTf?: { fastWindow?: number } }).longerTf?.fastWindow ?? 6),
-    longerTfSlowWindow: env.LONGER_TF_SLOW_WINDOW
-      ? Number(env.LONGER_TF_SLOW_WINDOW)
-      : ((cfg as { longerTf?: { slowWindow?: number } }).longerTf?.slowWindow ?? 20),
-    longerTfThresholdBps: env.LONGER_TF_THRESHOLD_BPS
-      ? Number(env.LONGER_TF_THRESHOLD_BPS)
-      : ((cfg as { longerTf?: { thresholdBps?: number } }).longerTf?.thresholdBps ?? 20),
-    longerTfStopLossBps: env.LONGER_TF_STOP_LOSS_BPS
-      ? Number(env.LONGER_TF_STOP_LOSS_BPS)
-      : ((cfg as { longerTf?: { stopLossBps?: number } }).longerTf?.stopLossBps ?? 50),
-    longerTfTakeProfitBps: env.LONGER_TF_TAKE_PROFIT_BPS
-      ? Number(env.LONGER_TF_TAKE_PROFIT_BPS)
-      : ((cfg as { longerTf?: { takeProfitBps?: number } }).longerTf?.takeProfitBps ?? 150),
-    pairsLeg1Symbol: env.PAIRS_LEG1_SYMBOL
-      ?? ((cfg as { pairs?: { leg1Symbol?: string } }).pairs?.leg1Symbol ?? "BTCUSDT"),
-    pairsLeg2Symbol: env.PAIRS_LEG2_SYMBOL
-      ?? ((cfg as { pairs?: { leg2Symbol?: string } }).pairs?.leg2Symbol ?? "ETHUSDT"),
-    pairsWindowSize: env.PAIRS_WINDOW_SIZE
-      ? Number(env.PAIRS_WINDOW_SIZE)
-      : ((cfg as { pairs?: { windowSize?: number } }).pairs?.windowSize ?? 200),
-    pairsEntryZ: env.PAIRS_ENTRY_Z
-      ? Number(env.PAIRS_ENTRY_Z)
-      : ((cfg as { pairs?: { entryZ?: number } }).pairs?.entryZ ?? 2.0),
-    pairsExitZ: env.PAIRS_EXIT_Z
-      ? Number(env.PAIRS_EXIT_Z)
-      : ((cfg as { pairs?: { exitZ?: number } }).pairs?.exitZ ?? 0.3),
-    pairsMaxHoldMinutes: env.PAIRS_MAX_HOLD_MINUTES
-      ? Number(env.PAIRS_MAX_HOLD_MINUTES)
-      : ((cfg as { pairs?: { maxHoldMinutes?: number } }).pairs?.maxHoldMinutes ?? 480),
-    pairsMaxNotionalUsdPerLeg: env.PAIRS_MAX_NOTIONAL_USD_PER_LEG
-      ? Number(env.PAIRS_MAX_NOTIONAL_USD_PER_LEG)
-      : ((cfg as { pairs?: { maxNotionalUsdPerLeg?: number } }).pairs?.maxNotionalUsdPerLeg ?? 100),
-    pairsKlineInterval: env.PAIRS_KLINE_INTERVAL
-      ?? ((cfg as { pairs?: { klineInterval?: string } }).pairs?.klineInterval ?? "5"),
-    pairsKlineRefreshSec: env.PAIRS_KLINE_REFRESH_SEC
-      ? Number(env.PAIRS_KLINE_REFRESH_SEC)
-      : ((cfg as { pairs?: { klineRefreshSec?: number } }).pairs?.klineRefreshSec ?? 30),
-    bollingerAdxBbPeriod: env.BOLLINGER_ADX_BB_PERIOD
-      ? Number(env.BOLLINGER_ADX_BB_PERIOD)
-      : ((cfg as { bollingerAdx?: { bbPeriod?: number } }).bollingerAdx?.bbPeriod ?? 20),
-    bollingerAdxBbStdDev: env.BOLLINGER_ADX_BB_STDDEV
-      ? Number(env.BOLLINGER_ADX_BB_STDDEV)
-      : ((cfg as { bollingerAdx?: { bbStdDev?: number } }).bollingerAdx?.bbStdDev ?? 2),
-    bollingerAdxAdxPeriod: env.BOLLINGER_ADX_ADX_PERIOD
-      ? Number(env.BOLLINGER_ADX_ADX_PERIOD)
-      : ((cfg as { bollingerAdx?: { adxPeriod?: number } }).bollingerAdx?.adxPeriod ?? 14),
-    bollingerAdxAdxRangingThreshold: env.BOLLINGER_ADX_ADX_RANGING_THRESHOLD
-      ? Number(env.BOLLINGER_ADX_ADX_RANGING_THRESHOLD)
-      : ((cfg as { bollingerAdx?: { adxRangingThreshold?: number } }).bollingerAdx?.adxRangingThreshold ?? 20),
-    bollingerAdxAdxTrendingThreshold: env.BOLLINGER_ADX_ADX_TRENDING_THRESHOLD
-      ? Number(env.BOLLINGER_ADX_ADX_TRENDING_THRESHOLD)
-      : ((cfg as { bollingerAdx?: { adxTrendingThreshold?: number } }).bollingerAdx?.adxTrendingThreshold ?? 25),
-    bollingerAdxStopLossBps: env.BOLLINGER_ADX_STOP_LOSS_BPS
-      ? Number(env.BOLLINGER_ADX_STOP_LOSS_BPS)
-      : ((cfg as { bollingerAdx?: { stopLossBps?: number } }).bollingerAdx?.stopLossBps ?? 80),
-    bollingerAdxTakeProfitBps: env.BOLLINGER_ADX_TAKE_PROFIT_BPS
-      ? Number(env.BOLLINGER_ADX_TAKE_PROFIT_BPS)
-      : ((cfg as { bollingerAdx?: { takeProfitBps?: number } }).bollingerAdx?.takeProfitBps ?? 150),
-    bollingerAdxKlineInterval: env.BOLLINGER_ADX_KLINE_INTERVAL
-      ?? ((cfg as { bollingerAdx?: { klineInterval?: string } }).bollingerAdx?.klineInterval ?? "15"),
-    bollingerAdxKlineRefreshSec: env.BOLLINGER_ADX_KLINE_REFRESH_SEC
-      ? Number(env.BOLLINGER_ADX_KLINE_REFRESH_SEC)
-      : ((cfg as { bollingerAdx?: { klineRefreshSec?: number } }).bollingerAdx?.klineRefreshSec ?? 60),
+    scanGateAutoTuneFallbackBps: (scanGateAutoTune.fallbackBps as number) ?? 15,
+    scanMinOpenInterestUsd: (scanner.minOpenInterestUsd as number) ?? 0,
+    scanMinListingAgeDays: (scanner.minListingAgeDays as number) ?? 0,
+    scanExcludedSymbols: (scanner.excludedSymbols as string[]) ?? [],
+    feeRoundTripBps: (bybit.feeRoundTripBps as number) ?? 0,
+    requireLocalMaConfirmation: (strategy.requireLocalMaConfirmation as boolean | undefined) ?? true,
+    strategyType,
+    useBullmqJobs: (runtime.useBullmqJobs as boolean | undefined) ?? false,
+    llmManagedAllowedSymbols: (llmManaged.allowedSymbols as string[]) ?? ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    llmManagedOpenReviewIntervalSec: (llmManaged.openReviewIntervalSec as number) ?? 600,
+    llmManagedManageReviewIntervalSec: (llmManaged.manageReviewIntervalSec as number) ?? 180,
+    llmManagedMaxNotionalUsd: (llmManaged.maxNotionalUsd as number) ?? 100,
+    llmManagedMaxLeverage: (llmManaged.maxLeverage as number) ?? 10,
+    llmManagedMaxHoldHours: (llmManaged.maxHoldHours as number) ?? 24,
+    llmManagedMaxAbsoluteLossUsd: (llmManaged.maxAbsoluteLossUsd as number) ?? 20,
+    llmManagedHedgeMaxNotionalUsd: (llmManaged.hedgeMaxNotionalUsd as number) ?? 100,
+    llmManagedModel: (llmManaged.model as string) ?? "claude-haiku-4-5-20251001",
+    llmManagedTimeoutMs: (llmManaged.timeoutMs as number) ?? 15000,
+    llmManagedPostCutLossCooldownMs: (llmManaged.postCutLossCooldownMs as number) ?? 1_800_000,
+    calendarPerpSymbol: (calendarSpread.perpSymbol as string) ?? "BTCUSDT",
+    calendarDatedSymbol: (calendarSpread.datedSymbol as string) ?? "",
+    calendarDatedDeliveryAt: (calendarSpread.datedDeliveryAt as number) ?? 0,
+    calendarEntryThresholdBps: (calendarSpread.entryThresholdBps as number) ?? 30,
+    calendarExitThresholdBps: (calendarSpread.exitThresholdBps as number) ?? 5,
+    calendarPreSettlementCloseHours: (calendarSpread.preSettlementCloseHours as number) ?? 24,
+    calendarMaxNotionalUsdPerLeg: (calendarSpread.maxNotionalUsdPerLeg as number) ?? 200,
+    calendarPollSec: (calendarSpread.pollSec as number) ?? 60,
+    advisorEnabled: (advisor.enabled as boolean) ?? false,
+    advisorIntervalMinutes: (advisor.intervalMinutes as number) ?? 30,
+    advisorModel: (advisor.model as string) ?? "claude-haiku-4-5-20251001",
+    orderSupervisorEnabled: (orderSupervisor.enabled as boolean) ?? false,
+    orderSupervisorStrategies: (orderSupervisor.strategies as string[])
+      ?? ["funding-arb", "basis-arb", "pairs-trading", "calendar-spread"],
+    orderSupervisorMinConfidence: (orderSupervisor.minConfidence as number) ?? 0.5,
+    orderSupervisorModel: (orderSupervisor.model as string) ?? "claude-haiku-4-5-20251001",
+    orderSupervisorTimeoutMs: (orderSupervisor.timeoutMs as number) ?? 8000,
+    orderSupervisorOnErrorBehavior:
+      (orderSupervisor.onErrorBehavior as string) === "approve" ? "approve" : "reject",
+    basisArbEntryThresholdBps: (basisArb.entryThresholdBps as number) ?? 8,
+    basisArbExitThresholdBps: (basisArb.exitThresholdBps as number) ?? 2,
+    basisArbMaxNotionalUsd: (basisArb.maxNotionalUsd as number) ?? 100,
+    basisArbMaxHoldMinutes: (basisArb.maxHoldMinutes as number) ?? 240,
+    fundingArbMinAbsRateBps: (fundingArb.minAbsRateBps as number) ?? 5,
+    fundingArbEntryWindowMinutesBefore: (fundingArb.entryWindowMinutesBefore as number) ?? 5,
+    fundingArbExitDelayMinutesAfter: (fundingArb.exitDelayMinutesAfter as number) ?? 2,
+    fundingArbMaxLeverage: (fundingArb.maxLeverage as number) ?? 5,
+    fundingArbMaxNotionalUsd: (fundingArb.maxNotionalUsd as number) ?? 100,
+    longerTfKlineInterval: (longerTf.klineInterval as string) ?? "15",
+    longerTfKlineRefreshSec: (longerTf.klineRefreshSec as number) ?? 60,
+    longerTfFastWindow: (longerTf.fastWindow as number) ?? 6,
+    longerTfSlowWindow: (longerTf.slowWindow as number) ?? 20,
+    longerTfThresholdBps: (longerTf.thresholdBps as number) ?? 20,
+    longerTfStopLossBps: (longerTf.stopLossBps as number) ?? 50,
+    longerTfTakeProfitBps: (longerTf.takeProfitBps as number) ?? 150,
+    pairsLeg1Symbol: (pairs.leg1Symbol as string) ?? "BTCUSDT",
+    pairsLeg2Symbol: (pairs.leg2Symbol as string) ?? "ETHUSDT",
+    pairsWindowSize: (pairs.windowSize as number) ?? 200,
+    pairsEntryZ: (pairs.entryZ as number) ?? 2.0,
+    pairsExitZ: (pairs.exitZ as number) ?? 0.3,
+    pairsMaxHoldMinutes: (pairs.maxHoldMinutes as number) ?? 480,
+    pairsMaxNotionalUsdPerLeg: (pairs.maxNotionalUsdPerLeg as number) ?? 100,
+    pairsKlineInterval: (pairs.klineInterval as string) ?? "5",
+    pairsKlineRefreshSec: (pairs.klineRefreshSec as number) ?? 30,
+    bollingerAdxBbPeriod: (bollingerAdx.bbPeriod as number) ?? 20,
+    bollingerAdxBbStdDev: (bollingerAdx.bbStdDev as number) ?? 2,
+    bollingerAdxAdxPeriod: (bollingerAdx.adxPeriod as number) ?? 14,
+    bollingerAdxAdxRangingThreshold: (bollingerAdx.adxRangingThreshold as number) ?? 20,
+    bollingerAdxAdxTrendingThreshold: (bollingerAdx.adxTrendingThreshold as number) ?? 25,
+    bollingerAdxStopLossBps: (bollingerAdx.stopLossBps as number) ?? 80,
+    bollingerAdxTakeProfitBps: (bollingerAdx.takeProfitBps as number) ?? 150,
+    bollingerAdxKlineInterval: (bollingerAdx.klineInterval as string) ?? "15",
+    bollingerAdxKlineRefreshSec: (bollingerAdx.klineRefreshSec as number) ?? 60,
   };
 }

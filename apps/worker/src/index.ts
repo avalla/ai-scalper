@@ -347,7 +347,7 @@ async function main(): Promise<void> {
   let llmManagedFlag = false;
   try {
     const traderConfig = readTraderConfig();
-    llmManagedFlag = traderConfig.strategyType === "llm-managed" && traderConfig.llmManagedUseBullmqJobs;
+    llmManagedFlag = traderConfig.strategyType === "llm-managed" && traderConfig.useBullmqJobs;
     if (llmManagedFlag) {
       llmManagedStack = await startLlmManagedWorkerStack({ connection, config: traderConfig });
       activeQueues.push(
@@ -384,44 +384,45 @@ async function main(): Promise<void> {
       ow.on("failed", logFailure(params.openQ) as unknown as (...args: unknown[]) => void);
       mw.on("failed", logFailure(params.manageQ) as unknown as (...args: unknown[]) => void);
     };
+    const useBullmq = cfg.useBullmqJobs;
     await startStack({
-      strategy: "funding-arb", flag: cfg.fundingArbUseBullmqJobs,
+      strategy: "funding-arb", flag: useBullmq,
       openQ: QUEUE_NAMES.fundingArbOpenDecision, manageQ: QUEUE_NAMES.fundingArbTradeManagement,
       start: () => startFundingArbWorkerStack({ connection, config: cfg }),
       assign: (s) => { fundingArbStack = s; },
     });
     await startStack({
-      strategy: "longer-tf", flag: cfg.longerTfUseBullmqJobs,
+      strategy: "longer-tf", flag: useBullmq,
       openQ: QUEUE_NAMES.longerTfOpenDecision, manageQ: QUEUE_NAMES.longerTfTradeManagement,
       start: () => startLongerTfWorkerStack({ connection, config: cfg }),
       assign: (s) => { longerTfStack = s; },
     });
     await startStack({
-      strategy: "bollinger-adx", flag: cfg.bollingerAdxUseBullmqJobs,
+      strategy: "bollinger-adx", flag: useBullmq,
       openQ: QUEUE_NAMES.bollingerAdxOpenDecision, manageQ: QUEUE_NAMES.bollingerAdxTradeManagement,
       start: () => startBollingerAdxWorkerStack({ connection, config: cfg }),
       assign: (s) => { bollingerAdxStack = s; },
     });
     await startStack({
-      strategy: "basis-arb", flag: cfg.basisArbUseBullmqJobs,
+      strategy: "basis-arb", flag: useBullmq,
       openQ: QUEUE_NAMES.basisArbOpenDecision, manageQ: QUEUE_NAMES.basisArbTradeManagement,
       start: () => startBasisArbWorkerStack({ connection, config: cfg }),
       assign: (s) => { basisArbStack = s; },
     });
     await startStack({
-      strategy: "pairs-trading", flag: cfg.pairsTradingUseBullmqJobs,
+      strategy: "pairs-trading", flag: useBullmq,
       openQ: QUEUE_NAMES.pairsTradingOpenDecision, manageQ: QUEUE_NAMES.pairsTradingTradeManagement,
       start: () => startPairsTradingWorkerStack({ connection, config: cfg }),
       assign: (s) => { pairsTradingStack = s; },
     });
     await startStack({
-      strategy: "calendar-spread", flag: cfg.calendarSpreadUseBullmqJobs,
+      strategy: "calendar-spread", flag: useBullmq,
       openQ: QUEUE_NAMES.calendarSpreadOpenDecision, manageQ: QUEUE_NAMES.calendarSpreadTradeManagement,
       start: () => startCalendarSpreadWorkerStack({ connection, config: cfg }),
       assign: (s) => { calendarSpreadStack = s; },
     });
     await startStack({
-      strategy: "ma-crossover", flag: cfg.maCrossoverUseBullmqJobs,
+      strategy: "ma-crossover", flag: useBullmq,
       openQ: QUEUE_NAMES.maCrossoverOpenDecision, manageQ: QUEUE_NAMES.maCrossoverTradeManagement,
       start: () => startMaCrossoverWorkerStack({ connection, config: cfg }),
       assign: (s) => { maCrossoverStack = s; },
