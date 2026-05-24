@@ -37,12 +37,35 @@ export interface HealthDeps {
   scanLatestPath?: string;
   /** Max kline file age. Default 5 min. */
   maxKlineStaleMs?: number;
+  /**
+   * Optional WS client probe. When provided, health adds a `ws` check that
+   * verifies: (a) the client is connected, (b) lastMessageAt is recent
+   * (<= maxWsSilenceMs), (c) reconnects in the last hour are <= cap.
+   * Pass null to skip.
+   */
+  ws?: WsHealthProbe | null;
+  maxWsSilenceMs?: number;
+  maxReconnectsPerHour?: number;
   /** Override for clock — useful in tests. */
   now?: () => number;
 }
 
+/**
+ * Minimal probe surface — a subset of BybitWsClient.getStats() + isConnected().
+ * The worker passes a small adapter that also tracks rolling reconnect counts.
+ */
+export interface WsHealthProbe {
+  isConnected(): boolean;
+  /** ms epoch of most recent WS message, or null if none yet. */
+  lastMessageAt(): number | null;
+  /** Number of reconnects in the trailing 1h window. */
+  reconnectsLastHour(): number;
+}
+
 const DEFAULT_MAX_ANTHROPIC_SILENCE_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_KLINE_STALE_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_WS_SILENCE_MS = 60_000;
+const DEFAULT_MAX_RECONNECTS_PER_HOUR = 5;
 const MAX_WAITING_PER_QUEUE = 100;
 const MAX_FAILED_PER_QUEUE = 50;
 
@@ -115,6 +138,31 @@ export async function runHealthChecks(deps: HealthDeps): Promise<HealthCheck> {
         ? { ok: true }
         : { ok: false, reason: `silent for ${Math.round(ageMs / 1000)}s (cap ${Math.round(cap / 1000)}s)` };
     }
+  }
+
+  // WebSocket health (connection + freshness + reconnect rate).
+  if (deps.ws) {
+    const ws = deps.ws;
+    const silenceCap = deps.maxWsSilenceMs ?? DEFAULT_MAX_WS_SILENCE_MS;
+    const reconnectCap = deps.maxReconnectsPerHour ?? DEFAULT_MAX_RECONNECTS_PER_HOUR;
+    const reasons: string[] = [];
+    if (!ws.isConnected()) reasons.push("not-connected");
+    const last = ws.lastMessageAt();
+    if (last === null) {
+      reasons.push("no-messages-received");
+    } else {
+      const ageMs = now() - last;
+      if (ageMs > silenceCap) {
+        reasons.push(`silent for ${Math.round(ageMs / 1000)}s (cap ${Math.round(silenceCap / 1000)}s)`);
+      }
+    }
+    const recon = ws.reconnectsLastHour();
+    if (recon > reconnectCap) {
+      reasons.push(`reconnects ${recon}/h > cap ${reconnectCap}`);
+    }
+    checks.ws = reasons.length === 0
+      ? { ok: true }
+      : { ok: false, reason: reasons.join(", ") };
   }
 
   // Kline staleness

@@ -160,3 +160,72 @@ describe("createHealthAlerter", () => {
   // Silence unused-import warnings in some setups
   test("mkdirSync import is referenced", () => { expect(typeof mkdirSync).toBe("function"); });
 });
+
+describe("runHealthChecks — ws probe", () => {
+  test("all WS checks pass → ws.ok=true", async () => {
+    const now = Date.now();
+    const result = await runHealthChecks({
+      redis: { async ping() { return "PONG"; } },
+      ws: {
+        isConnected: () => true,
+        lastMessageAt: () => now - 5_000,
+        reconnectsLastHour: () => 1,
+      },
+      now: () => now,
+    });
+    expect(result.checks.ws).toBeDefined();
+    expect(result.checks.ws.ok).toBe(true);
+  });
+
+  test("WS not connected → ws.ok=false with reason", async () => {
+    const result = await runHealthChecks({
+      redis: { async ping() { return "PONG"; } },
+      ws: {
+        isConnected: () => false,
+        lastMessageAt: () => Date.now(),
+        reconnectsLastHour: () => 0,
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.checks.ws.ok).toBe(false);
+    expect(result.checks.ws.reason).toContain("not-connected");
+  });
+
+  test("WS messages stale (> maxWsSilenceMs) → ok=false", async () => {
+    const now = Date.now();
+    const result = await runHealthChecks({
+      redis: { async ping() { return "PONG"; } },
+      ws: {
+        isConnected: () => true,
+        lastMessageAt: () => now - 120_000,
+        reconnectsLastHour: () => 0,
+      },
+      maxWsSilenceMs: 60_000,
+      now: () => now,
+    });
+    expect(result.checks.ws.ok).toBe(false);
+    expect(result.checks.ws.reason).toContain("silent");
+  });
+
+  test("WS reconnect storm (> cap) → ok=false", async () => {
+    const result = await runHealthChecks({
+      redis: { async ping() { return "PONG"; } },
+      ws: {
+        isConnected: () => true,
+        lastMessageAt: () => Date.now(),
+        reconnectsLastHour: () => 9,
+      },
+      maxReconnectsPerHour: 5,
+    });
+    expect(result.checks.ws.ok).toBe(false);
+    expect(result.checks.ws.reason).toContain("reconnects 9/h");
+  });
+
+  test("ws probe omitted → ws check skipped entirely", async () => {
+    const result = await runHealthChecks({
+      redis: { async ping() { return "PONG"; } },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.checks.ws).toBeUndefined();
+  });
+});

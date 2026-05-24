@@ -134,7 +134,18 @@ export interface TraderConfig {
   feeRoundTripBps: number;
   requireLocalMaConfirmation: boolean;
   // Strategy dispatch
-  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread" | "llm-managed";
+  strategyType: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread" | "llm-managed" | "liquidation-cascade";
+  // Liquidation-cascade strategy (Phase 2 WS — requires runtime.useWebSocket=true)
+  liquidationWindowMs: number;
+  liquidationMinClusterUsd: number;
+  liquidationMinCount: number;
+  liquidationCheckIntervalMs: number;
+  liquidationOrderUsd: number;
+  liquidationLeverage: number;
+  liquidationStopLossBps: number;
+  liquidationTakeProfitBps: number;
+  liquidationMaxHoldSec: number;
+  liquidationAllowedSymbols: string[];
   /**
    * Single consolidated flag (replaces the 8 per-strategy *UseBullmqJobs
    * flags). When true AND the active `strategyType` has a BullMQ worker
@@ -278,10 +289,11 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     if (
       raw === "funding-arb" || raw === "longer-tf" || raw === "ma-crossover"
       || raw === "basis-arb" || raw === "pairs-trading" || raw === "bollinger-adx"
-      || raw === "calendar-spread" || raw === "llm-managed"
+      || raw === "calendar-spread" || raw === "llm-managed" || raw === "liquidation-cascade"
     ) return raw;
     return "ma-crossover";
   })();
+  const liquidation = sect(cfg, "liquidation");
 
   // Position mode: env override permitted (paper vs live can flip).
   const bybitPositionMode: "one-way" | "hedge" =
@@ -449,5 +461,15 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     bollingerAdxTakeProfitBps: (bollingerAdx.takeProfitBps as number) ?? 150,
     bollingerAdxKlineInterval: (bollingerAdx.klineInterval as string) ?? "15",
     bollingerAdxKlineRefreshSec: (bollingerAdx.klineRefreshSec as number) ?? 60,
+    liquidationWindowMs: (liquidation.windowMs as number) ?? 30_000,
+    liquidationMinClusterUsd: (liquidation.minClusterUsd as number) ?? 50_000,
+    liquidationMinCount: (liquidation.minCount as number) ?? 5,
+    liquidationCheckIntervalMs: (liquidation.checkIntervalMs as number) ?? 5_000,
+    liquidationOrderUsd: (liquidation.orderUsd as number) ?? 10,
+    liquidationLeverage: (liquidation.leverage as number) ?? 3,
+    liquidationStopLossBps: (liquidation.stopLossBps as number) ?? 50,
+    liquidationTakeProfitBps: (liquidation.takeProfitBps as number) ?? 80,
+    liquidationMaxHoldSec: (liquidation.maxHoldSec as number) ?? 60,
+    liquidationAllowedSymbols: (liquidation.allowedSymbols as string[]) ?? ["BTCUSDT", "ETHUSDT"],
   };
 }

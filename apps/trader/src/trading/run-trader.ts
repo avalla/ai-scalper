@@ -822,7 +822,7 @@ function buildClosedPositionLedgerEntry(params: {
   symbol: string;
   feeRoundTripBps: number;
   championIdAtEntry?: string | null;
-  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread" | "llm-managed";
+  strategyType?: "ma-crossover" | "funding-arb" | "longer-tf" | "basis-arb" | "pairs-trading" | "bollinger-adx" | "calendar-spread" | "llm-managed" | "liquidation-cascade";
   basisEntryBps?: number;
   basisExitBps?: number;
   pairsLeg2Symbol?: string;
@@ -3921,6 +3921,28 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             ts: observedAt,
             event: `${config.strategyType}-bullmq-mode`,
             message: "trader subprocess idle; trades handled by worker queues",
+          }));
+        }
+        ticks += 1;
+        if (config.pollMs > 0) await sleep(config.pollMs);
+        continue;
+      }
+
+      // ── liquidation-cascade dispatch (Phase 2 v1):
+      //    The pure decision lives in strategies/liquidation-cascade.ts.
+      //    Live wiring requires the WS feeder (publicTrade + Redis
+      //    LiquidationsCache). Until the full open/manage loop lands,
+      //    we idle the subprocess with a clear warning so operators can
+      //    select the strategy in config without crashing the runner.
+      if (config.strategyType === "liquidation-cascade") {
+        if (ticks === 0) {
+          console.log(JSON.stringify({
+            ts: observedAt,
+            event: "liquidation-cascade-dispatch",
+            message: config.useWebSocket
+              ? "liquidation-cascade selected; full WS-driven tick wiring is deferred — trader idle"
+              : "liquidation-cascade requires runtime.useWebSocket=true — trader idle",
+            useWebSocket: config.useWebSocket,
           }));
         }
         ticks += 1;

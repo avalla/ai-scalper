@@ -1,0 +1,60 @@
+{
+  "tradingProfile": "standard",
+  "entry": {
+    "executionMode": "taker",
+    "makerOffsetTicks": 0,
+    "makerPollMs": 250,
+    "makerTimeoutMs": 1500
+  },
+  "wallet": {
+    "autoSize": false,
+    "accountType": "UNIFIED",
+    "coin": "USDT",
+    "fraction": 1,
+    "maxOrderUsdCap": 25
+  },
+  "bybit": {
+    "category": "linear",
+    "symbol": "BTCUSDT",
+    "pollMs": 1000,
+    "orderUsd": 10,
+    "leverage": 3,
+    "slippageTolerancePercent": 0.1,
+    "positionMode": "one-way",
+    "feeRoundTripBps": 11
+  },
+  "strategy": {
+    "type": "liquidation-cascade",
+    "fastWindow": 5,
+    "slowWindow": 20,
+    "thresholdBps": 4,
+    "stopLossBps": 50,
+    "takeProfitBps": 80,
+    "requireLocalMaConfirmation": false
+  },
+  "risk": {
+    "maxPositionUsd": 50,
+    "maxDailyLossUsd": 30,
+    "maxSpreadBps": 8,
+    "minTradeIntervalMs": 5000,
+    "maxFundingRateBps": 30
+  },
+  "liquidation": {
+    "windowMs": 30000,
+    "minClusterUsd": 50000,
+    "minCount": 5,
+    "checkIntervalMs": 5000,
+    "orderUsd": 10,
+    "leverage": 3,
+    "stopLossBps": 50,
+    "takeProfitBps": 80,
+    "maxHoldSec": 60,
+    "allowedSymbols": ["BTCUSDT", "ETHUSDT"]
+  },
+  "runtime": {
+    "artifactFlushTicks": 30,
+    "statePersistenceEnabled": false,
+    "useWebSocket": true,
+    "useBullmqJobs": false
+  }
+}

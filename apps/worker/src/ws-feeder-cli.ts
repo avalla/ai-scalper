@@ -19,10 +19,13 @@ const DEFAULT_SYMBOLS = [
   "BNBUSDT",
 ];
 
-function readSymbols(): string[] {
-  const raw = process.env.WS_FEEDER_SYMBOLS;
-  if (!raw || raw.trim() === "") return DEFAULT_SYMBOLS;
+function parseCsvSymbols(raw: string | undefined, fallback: string[]): string[] {
+  if (!raw || raw.trim() === "") return fallback;
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function readSymbols(): string[] {
+  return parseCsvSymbols(process.env.WS_FEEDER_SYMBOLS, DEFAULT_SYMBOLS);
 }
 
 async function main(): Promise<void> {
@@ -30,10 +33,17 @@ async function main(): Promise<void> {
   const baseUrl = process.env.BYBIT_WS_BASE_URL || "wss://stream.bybit.com/v5/public";
   const category = (process.env.BYBIT_WS_CATEGORY as "linear" | "spot" | "inverse") || "linear";
   const symbols = readSymbols();
+  const orderbookSymbols = parseCsvSymbols(process.env.WS_ORDERBOOK_SYMBOLS, symbols);
+  const liquidationSymbols = parseCsvSymbols(process.env.WS_LIQUIDATION_SYMBOLS, symbols);
+  const orderbookDepthRaw = Number(process.env.WS_ORDERBOOK_DEPTH || "50");
+  const orderbookDepth: 1 | 50 = orderbookDepthRaw === 1 ? 1 : 50;
 
   const feeder = createWsFeeder({
     redis,
     symbols,
+    orderbookSymbols,
+    orderbookDepth,
+    liquidationSymbols,
     baseUrl,
     category,
     keyPrefix: process.env.WS_FEEDER_KEY_PREFIX || "ws",
