@@ -22,6 +22,24 @@ async function main(): Promise<void> {
     stderr: "inherit",
   });
 
+  // Optional: WS feeder — gated on USE_WEBSOCKET=true (mirrors the trader
+  // runtime.useWebSocket config flag). One persistent connection feeds Redis.
+  let wsFeederProcess: ReturnType<typeof Bun.spawn> | null = null;
+  if (process.env.USE_WEBSOCKET === "true") {
+    wsFeederProcess = Bun.spawn({
+      cmd: ["bun", "src/ws-feeder-cli.ts"],
+      cwd,
+      env: process.env,
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      event: "ws-feeder-spawned",
+      pid: wsFeederProcess.pid,
+    }));
+  }
+
   // Optional: LLM strategy advisor — gated on ANTHROPIC_API_KEY.
   let advisorProcess: ReturnType<typeof Bun.spawn> | null = null;
   if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim() !== "") {
@@ -42,6 +60,9 @@ async function main(): Promise<void> {
   const shutdownAdvisor = () => {
     if (advisorProcess && !advisorProcess.killed) {
       try { advisorProcess.kill("SIGTERM"); } catch { /* ignore */ }
+    }
+    if (wsFeederProcess && !wsFeederProcess.killed) {
+      try { wsFeederProcess.kill("SIGTERM"); } catch { /* ignore */ }
     }
   };
   process.on("SIGTERM", shutdownAdvisor);

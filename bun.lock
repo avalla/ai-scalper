@@ -25,6 +25,7 @@
     "apps/worker": {
       "name": "@ai-scalper/worker",
       "dependencies": {
+        "@ai-scalper/bybit-client": "workspace:*",
         "@ai-scalper/market-scanner": "workspace:*",
         "@ai-scalper/queueing": "workspace:*",
         "@bull-board/api": "^6.14.0",
@@ -39,6 +40,15 @@
     },
     "packages/bybit-client": {
       "name": "@ai-scalper/bybit-client",
+      "devDependencies": {
+        "ioredis": "^5.6.1",
+      },
+      "peerDependencies": {
+        "ioredis": "^5.0.0",
+      },
+      "optionalPeers": [
+        "ioredis",
+      ],
     },
     "packages/market-scanner": {
       "name": "@ai-scalper/market-scanner",

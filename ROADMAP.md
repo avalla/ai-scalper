@@ -22,6 +22,34 @@ If you need to change `BYBIT_LEVERAGE`, `STRATEGY_*`, `RISK_*`,
 `AGGRESSIVE_*`, `META_*`, `LLM_MANAGED_*`, `*_USE_BULLMQ_JOBS`, etc.,
 edit the JSON config — env overrides are gone.
 
+## 🔌 WebSocket data feed (Phase 1 — shipped)
+
+Bybit V5 public WS (linear perps) replaces REST ticker polling for one PoC
+consumer — the market scanner — with sub-100ms freshness, no rate limits,
+and multi-symbol fan-out over a single connection.
+
+**Shipped:**
+- `packages/bybit-client/src/ws.ts` — WS client (snapshot+delta merge,
+  heartbeat, exponential reconnect, re-subscribe on reconnect)
+- `packages/bybit-client/src/ws-redis-cache.ts` — Redis-backed
+  `SharedTickerCache` (HASH + pub/sub, TTL-based staleness)
+- `apps/worker/src/ws-feeder.ts` + `ws-feeder-cli.ts` — long-running feeder
+  process; one WS connection writes every update into Redis
+- `packages/market-scanner/src/index.ts` — opt-in `useWebSocket` flag;
+  `rankTradeSetups`/`scanMarket` accept an optional `SharedTickerCache`
+  and prefer cached bid/ask/last/funding when fresh (<30s), falling back
+  to REST otherwise
+- New config flag `runtime.useWebSocket` (default `false`) wired into
+  every `apps/trader/config*.json`; mirrored as `USE_WEBSOCKET=true`
+  to spawn the feeder from `start-stack`
+
+**Phase 2 (pending, not in this drop):**
+- Migrate per-strategy `getTicker` call sites (40+) to the shared cache
+- Subscribe to `orderbook.*` (orderbook strategies, smarter maker quoting)
+- Subscribe to `publicTrade.*` (planned liquidation strategy)
+- Move private WS (positions, executions, orders) onto an authenticated
+  stream
+
 ## ✅ Shipped
 
 | # | Name | Config | Edge | Status | Notes |

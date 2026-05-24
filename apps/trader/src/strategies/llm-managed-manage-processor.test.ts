@@ -26,6 +26,7 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     llmManagedTimeoutMs: 15000,
     llmManagedPostCutLossCooldownMs: 30 * 60_000,
     useBullmqJobs: true,
+    useWebSocket: false,
     paperTrading: true,
     feeRoundTripBps: 11,
     walletAccountType: "UNIFIED",

@@ -22,7 +22,7 @@
   "exceptional": { "enabled": false, "allowedSymbols": [], "leverage": 100, "maxSpreadBps": 0.5, "maxFundingRateBps": 2, "minHourlyMoveBps": 100, "minMinuteRangeBps": 20, "minNetEdgeBps": 10 },
   "exitPolicy": { "mode": "logical", "safetyDelayMs": 60000, "safetyStopBps": 300 },
   "meta": { "enabled": false, "warmupMinTrades": 5, "pnlWindowSize": 50, "includeAggressiveVariants": false, "halfLifeDays": 0 },
-  "runtime": { "artifactFlushTicks": 5, "statePersistenceEnabled": true },
+  "runtime": { "artifactFlushTicks": 5, "statePersistenceEnabled": true, "useWebSocket": false },
   "trailingStop": { "enabled": false, "activationBps": 30, "trailBps": 15 },
   "reconcile": { "intervalTicks": 30, "setTradingStopRetryMax": 3, "setTradingStopRetryDelayMs": 500 },
   "drawdown": { "velocityWindowMs": 3600000, "velocityMaxUsd": 30, "maxConsecutiveLosses": 5 },

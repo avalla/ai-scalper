@@ -86,7 +86,8 @@
   },
   "runtime": {
     "artifactFlushTicks": 30,
-    "statePersistenceEnabled": false
+    "statePersistenceEnabled": false,
+    "useWebSocket": false
   },
   "trailingStop": {
     "enabled": true,

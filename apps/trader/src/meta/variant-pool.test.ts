@@ -114,6 +114,7 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     llmManagedTimeoutMs: 15000,
     llmManagedPostCutLossCooldownMs: 1800000,
     useBullmqJobs: false,
+    useWebSocket: false,
     basisArbEntryThresholdBps: 8,
     basisArbExitThresholdBps: 2,
     basisArbMaxNotionalUsd: 100,

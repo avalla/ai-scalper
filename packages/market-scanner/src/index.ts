@@ -1,5 +1,6 @@
 import { createBybitClient } from "@ai-scalper/bybit-client";
-import type { MarketKline } from "@ai-scalper/bybit-client";
+import type { MarketKline, MarketTicker } from "@ai-scalper/bybit-client";
+import type { SharedTickerCache } from "@ai-scalper/bybit-client/ws-redis-cache";
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
@@ -25,6 +26,18 @@ export interface ScanConfig {
   scanMinOpenInterestUsd?: number;
   scanMinListingAgeDays?: number;
   scanExcludedSymbols?: string[];
+  /**
+   * Phase 1 PoC: when true and a SharedTickerCache is injected, the scanner
+   * overrides REST per-symbol ticker fields with cached WS values (when
+   * fresh). Stale cache entries fall back to REST. Backward-compat default
+   * is false — pure REST polling.
+   */
+  useWebSocket?: boolean;
+  /**
+   * Max acceptable age (ms) for a cached ticker before falling back to REST.
+   * Default 30_000.
+   */
+  cacheMaxAgeMs?: number;
 }
 
 export interface ScanArtifacts {
@@ -65,6 +78,8 @@ export function readScanConfig(env: NodeJS.ProcessEnv = process.env): ScanConfig
     scanExcludedSymbols: env.SCAN_EXCLUDED_SYMBOLS
       ? env.SCAN_EXCLUDED_SYMBOLS.split(",").map((s) => s.trim()).filter(Boolean)
       : [],
+    useWebSocket: env.SCAN_USE_WEBSOCKET === "true",
+    cacheMaxAgeMs: env.SCAN_CACHE_MAX_AGE_MS ? Number(env.SCAN_CACHE_MAX_AGE_MS) : undefined,
   };
 }
 
@@ -258,7 +273,10 @@ function resolveOutputDir(scanOutputDir: string): string {
   return join(cwd, scanOutputDir);
 }
 
-export async function rankTradeSetups(config: ScanConfig): Promise<RankedTradeSetup[]> {
+export async function rankTradeSetups(
+  config: ScanConfig,
+  tickerCache?: SharedTickerCache,
+): Promise<RankedTradeSetup[]> {
   const client = createBybitClient({
     baseUrl: config.scanBaseUrl,
   });
@@ -268,6 +286,25 @@ export async function rankTradeSetups(config: ScanConfig): Promise<RankedTradeSe
     .filter((ticker) => ticker.symbol.endsWith("USDT") && !excluded.has(ticker.symbol))
     .sort((left, right) => parseTickerNumber(right.turnover24h) - parseTickerNumber(left.turnover24h))
     .slice(0, config.scanPrefilterLimit);
+
+  // Phase 1 WS PoC: for each shortlisted symbol, if a fresh cached ticker
+  // exists, prefer its bid/ask/last/funding fields. Stale entries (or any
+  // cache read failure) silently fall back to the REST value.
+  const wsEnabled = config.useWebSocket === true && tickerCache !== undefined;
+  const maxAgeMs = config.cacheMaxAgeMs ?? 30_000;
+  if (wsEnabled && tickerCache) {
+    await Promise.all(shortlist.map(async (ticker, idx) => {
+      try {
+        const age = await tickerCache.getAge(ticker.symbol);
+        if (age === null || age > maxAgeMs) return;
+        const cached = await tickerCache.getTicker(ticker.symbol);
+        if (!cached) return;
+        shortlist[idx] = mergePreferCached(ticker, cached);
+      } catch {
+        /* best-effort: REST value remains in place */
+      }
+    }));
+  }
 
   const minOiUsd = config.scanMinOpenInterestUsd ?? 0;
   const minListingDays = config.scanMinListingAgeDays ?? 0;
@@ -345,8 +382,27 @@ export async function rankTradeSetups(config: ScanConfig): Promise<RankedTradeSe
     .slice(0, config.scanLimit);
 }
 
-export async function scanMarket(config: ScanConfig): Promise<MarketScanResult> {
-  const ranked = await rankTradeSetups(config);
+/**
+ * Merge a cached WS ticker on top of a REST ticker, preferring cached values
+ * for the live-quote fields (price/bid/ask/funding) but keeping REST values
+ * for any fields the cache happens to have empty.
+ */
+function mergePreferCached(rest: MarketTicker, cached: MarketTicker): MarketTicker {
+  const result = { ...rest };
+  for (const key of Object.keys(cached) as (keyof MarketTicker)[]) {
+    const value = cached[key];
+    if (value !== undefined && value !== null && value !== "") {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+export async function scanMarket(
+  config: ScanConfig,
+  tickerCache?: SharedTickerCache,
+): Promise<MarketScanResult> {
+  const ranked = await rankTradeSetups(config, tickerCache);
 
   const artifacts = await persistScanArtifacts({
     candidates: ranked,

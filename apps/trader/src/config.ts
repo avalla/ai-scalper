@@ -142,6 +142,14 @@ export interface TraderConfig {
    * Sourced from JSON path `runtime.useBullmqJobs`, default false.
    */
   useBullmqJobs: boolean;
+  /**
+   * Phase 1 WS feed. When true, the ws-feeder process is spawned (by
+   * start-stack) and the market-scanner reads live tickers from the shared
+   * Redis cache instead of REST `/v5/market/tickers` (falling back to REST
+   * for stale entries). Defaults false — pure backward-compatibility flag.
+   * Sourced from JSON path `runtime.useWebSocket`.
+   */
+  useWebSocket: boolean;
   // LLM-managed strategy
   llmManagedAllowedSymbols: string[];
   llmManagedOpenReviewIntervalSec: number;
@@ -376,6 +384,7 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     requireLocalMaConfirmation: (strategy.requireLocalMaConfirmation as boolean | undefined) ?? true,
     strategyType,
     useBullmqJobs: (runtime.useBullmqJobs as boolean | undefined) ?? false,
+    useWebSocket: (runtime.useWebSocket as boolean | undefined) ?? false,
     llmManagedAllowedSymbols: (llmManaged.allowedSymbols as string[]) ?? ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     llmManagedOpenReviewIntervalSec: (llmManaged.openReviewIntervalSec as number) ?? 600,
     llmManagedManageReviewIntervalSec: (llmManaged.manageReviewIntervalSec as number) ?? 180,

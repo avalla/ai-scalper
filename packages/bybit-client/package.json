@@ -3,6 +3,17 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./ws": "./src/ws.ts",
+    "./ws-redis-cache": "./src/ws-redis-cache.ts"
+  },
+  "peerDependencies": {
+    "ioredis": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": { "optional": true }
+  },
+  "devDependencies": {
+    "ioredis": "^5.6.1"
   }
 }

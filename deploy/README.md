@@ -8,6 +8,8 @@ Three supported paths: manual (tmux), systemd, docker-compose. Pick one.
 - Bun >= 1.3.6 (manual / systemd) — `curl -fsSL https://bun.sh/install | bash`
 - Redis >= 7 (any deploy)
 - Outbound HTTPS to `api.bybit.com` / `api-testnet.bybit.com` and `api.anthropic.com`
+- **WS feeder only** — outbound WSS to `stream.bybit.com:443`
+  (or `stream-testnet.bybit.com:443`) when `USE_WEBSOCKET=true`
 
 ## Environment
 
@@ -23,6 +25,10 @@ Copy `.env.example` to `.env` at the repo root and fill in:
 | `ALERT_WEBHOOK_URL` | optional | Discord/Slack/Telegram webhook for health alerts |
 | `LOG_LEVEL` | optional | `info` (default), `debug`, `warn` |
 | `CONFIG_FILE` | optional | per-strategy config selector (e.g. `config.funding-arb.json`) |
+| `USE_WEBSOCKET` | optional | when `true`, `start-stack` spawns the `ws-feeder-cli` process; mirror of trader config `runtime.useWebSocket` |
+| `WS_FEEDER_SYMBOLS` | optional | comma-separated symbol list; defaults to the top-liquid set (BTC/ETH/SOL/XRP/DOGE/BNB) |
+| `BYBIT_WS_BASE_URL` | optional | defaults to `wss://stream.bybit.com/v5/public` |
+| `BYBIT_WS_CATEGORY` | optional | `linear` (default) / `spot` / `inverse` |
 
 `.env` MUST live next to the `docker-compose.yml` if using docker.
 
@@ -66,6 +72,22 @@ docker compose logs -f bot
 ```
 
 Stop: `docker compose down`. Persisted: `redis-data` volume + `apps/trader/data/`.
+
+## WS feeder (Phase 1 — opt-in)
+
+When `USE_WEBSOCKET=true` and `runtime.useWebSocket` is enabled in the
+trader config, `start-stack` spawns an additional long-running process
+(`apps/worker/src/ws-feeder-cli.ts`) that maintains a single Bybit V5
+public WebSocket connection and publishes every ticker update to Redis.
+The market scanner reads from that shared cache; other strategies still
+use REST in Phase 1. Resource cost: one persistent connection, ~1KB/sec.
+
+Run standalone for debugging:
+
+```bash
+cd apps/worker
+WS_FEEDER_SYMBOLS=BTCUSDT,ETHUSDT bun src/ws-feeder-cli.ts
+```
 
 ## Monitoring
 
