@@ -120,11 +120,28 @@ function parsePersistedTraderSnapshot(raw: string): PersistedTraderSnapshot | nu
   };
 }
 
-export function createPositionLedger(client: RedisClientLike = createPositionLedgerClient()) {
+export interface PositionLedgerOptions {
+  /**
+   * Optional cost tracker — when provided, `appendClosedPosition` records the
+   * trade's `feeUsd` into the rolling cost window. Loose coupling so the
+   * ledger remains usable without Redis-backed cost tracking.
+   */
+  costTracker?: { recordBybitFee(feeUsd: number): Promise<void> };
+}
+
+export function createPositionLedger(
+  client: RedisClientLike = createPositionLedgerClient(),
+  options: PositionLedgerOptions = {},
+) {
   return {
     async appendClosedPosition(entry: ClosedPositionLedgerEntry): Promise<void> {
       await client.lpush(CLOSED_POSITIONS_KEY, JSON.stringify(entry));
       await client.ltrim(CLOSED_POSITIONS_KEY, 0, CLOSED_POSITIONS_LIMIT - 1);
+      if (options.costTracker && typeof entry.feeUsd === "number" && entry.feeUsd > 0) {
+        try {
+          await options.costTracker.recordBybitFee(entry.feeUsd);
+        } catch { /* tracker is best-effort; don't break ledger writes */ }
+      }
     },
 
     async close(): Promise<void> {

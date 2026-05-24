@@ -45,7 +45,11 @@ import {
 } from "@ai-scalper/market-scanner";
 import { createWebhookAlerter, type WebhookAlerter } from "../alerts/webhook";
 import type { TraderConfig } from "../config";
-import { buildEntryExecutionPlan } from "./execution-policy";
+import {
+  MAKER_ONLY_AGGRESSIVE_MAX_RETRIES,
+  buildEntryExecutionPlan,
+  nextMakerOnlyAggressiveRetryPrice,
+} from "./execution-policy";
 import {
   isSymbolInTickerCooldown,
   registerTickerFailure,
@@ -416,6 +420,66 @@ async function executeTrade(params: {
       filled: true,
       fillPrice: resolution.fillPrice ?? entryPlan.limitPrice ?? params.lastPrice,
 
+    };
+  }
+
+  // maker-only-aggressive: cancel + replace, escalating 0.5 ticks toward mid.
+  // Up to MAKER_ONLY_AGGRESSIVE_MAX_RETRIES attempts then GIVE UP (no taker
+  // fallback — fee discipline).
+  if (entryPlan.mode === "maker-only-aggressive" && entryPlan.limitPrice !== null) {
+    let lastPrice = entryPlan.limitPrice;
+    let lastLinkId = orderLinkId;
+    for (let attempt = 1; attempt <= MAKER_ONLY_AGGRESSIVE_MAX_RETRIES; attempt++) {
+      await params.client.cancelOrder({
+        category: params.config.category,
+        symbol: params.symbol,
+        orderLinkId: lastLinkId,
+      }).catch(() => { /* may already be cancelled */ });
+
+      const retryPrice = nextMakerOnlyAggressiveRetryPrice({
+        action: params.action,
+        attempt,
+        basePrice: lastPrice,
+        instrument: params.instrument,
+      });
+      if (retryPrice === null) break;
+
+      const retryLinkId = crypto.randomUUID();
+      await params.client.createOrder({
+        category: params.config.category,
+        symbol: params.symbol,
+        side: toOrderSide(params.action),
+        qty: params.qty,
+        orderType: "Limit",
+        price: retryPrice.toString(),
+        timeInForce: "PostOnly",
+        orderLinkId: retryLinkId,
+      });
+
+      const retryRes = await waitForEntryOrderResolution({
+        action: params.action,
+        client: params.client,
+        config: params.config,
+        orderLinkId: retryLinkId,
+        qty: params.qty,
+        symbol: params.symbol,
+      });
+      if (retryRes.status === "filled") {
+        return {
+          executionMode: entryPlan.mode,
+          fallbackUsed: false,
+          filled: true,
+          fillPrice: retryRes.fillPrice ?? retryPrice,
+        };
+      }
+      lastPrice = retryPrice;
+      lastLinkId = retryLinkId;
+    }
+    return {
+      executionMode: entryPlan.mode,
+      fallbackUsed: false,
+      filled: false,
+      fillPrice: lastPrice,
     };
   }
 

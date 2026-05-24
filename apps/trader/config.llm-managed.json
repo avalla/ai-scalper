@@ -2,7 +2,7 @@
   "tradingProfile": "standard",
   "strategy": { "type": "llm-managed" },
   "entry": {
-    "executionMode": "taker",
+    "executionMode": "maker-only-aggressive",
     "makerOffsetTicks": 1,
     "makerPollMs": 200,
     "makerTimeoutMs": 2000

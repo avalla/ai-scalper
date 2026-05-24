@@ -22,6 +22,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import { recordAnthropicResponseUsage } from "../observability/anthropic-usage";
 
 // ── Position + context types ────────────────────────────────────────────────
 
@@ -87,6 +88,9 @@ export interface OpenDecisionInput {
   model?: string;
   timeoutMs?: number;
   anthropicClient?: AnthropicClientLike;
+  costTracker?: { recordAnthropicCall(u: {
+    inputTokens: number; cachedTokens: number; outputTokens: number; model: string;
+  }): Promise<void> };
 }
 
 export interface OpenDecision {
@@ -131,6 +135,9 @@ export interface ManageDecisionInput {
   model?: string;
   timeoutMs?: number;
   anthropicClient?: AnthropicClientLike;
+  costTracker?: { recordAnthropicCall(u: {
+    inputTokens: number; cachedTokens: number; outputTokens: number; model: string;
+  }): Promise<void> };
 }
 
 const VALID_MANAGE_ACTIONS: ReadonlyArray<ManageAction> = [
@@ -546,6 +553,8 @@ export async function getOpenDecision(
     return safeOpenDefault(msg);
   }
 
+  await recordAnthropicResponseUsage(input.costTracker, response, model);
+
   const toolUse = response.content.find(
     (b): b is { type: "tool_use"; name: string; input: unknown } =>
       b.type === "tool_use" && (b as { name?: string }).name === "open_or_skip",
@@ -646,6 +655,8 @@ export async function getManageDecision(
     if (msg === "llm-managed-timeout") return safeManageDefault("timeout");
     return safeManageDefault(msg);
   }
+
+  await recordAnthropicResponseUsage(input.costTracker, response, model);
 
   const toolUse = response.content.find(
     (b): b is { type: "tool_use"; name: string; input: unknown } =>

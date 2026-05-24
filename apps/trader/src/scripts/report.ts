@@ -10,6 +10,11 @@ import {
   createPositionLedgerClient,
   type ClosedPositionLedgerEntry,
 } from "../trading/position-ledger";
+import {
+  createCostTracker,
+  type CostRedisLike,
+  type CostSnapshot,
+} from "../observability/cost-tracker";
 
 // `championIdAtEntry` is not currently persisted on the ledger entry; treat it
 // as an optional extension so the report still groups it when added later.
@@ -305,6 +310,49 @@ async function loadEntries(): Promise<ReportEntry[]> {
   }
 }
 
+function formatUsdShort(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+export function printCostSnapshot(snap: CostSnapshot, netPnlUsd: number): void {
+  console.log("─── Costs (last 24h) ────────────────────────────────────");
+  console.log(`Bybit fees       : ${formatUsdShort(snap.bybitFeesUsd)}`);
+  console.log(
+    `Anthropic tokens : ${formatTokens(snap.anthropicInputTokens)} in / `
+    + `${formatTokens(snap.anthropicCachedTokens)} cached / `
+    + `${formatTokens(snap.anthropicOutputTokens)} out`
+    + ` (${snap.anthropicCalls} calls)`,
+  );
+  console.log(`Anthropic cost   : ${formatUsdShort(snap.anthropicCostUsd)}`);
+  console.log(`TOTAL COST       : ${formatUsdShort(snap.totalCostUsd)}`);
+  console.log(`Net PnL (post-fee post-llm) : ${formatUsdShort(netPnlUsd - snap.anthropicCostUsd)}`);
+  console.log("─────────────────────────────────────────────────────────");
+}
+
+async function loadCostSnapshot(): Promise<CostSnapshot | null> {
+  try {
+    const client = createPositionLedgerClient() as unknown as CostRedisLike & {
+      quit(): Promise<unknown>;
+      disconnect(): void;
+    };
+    try {
+      const tracker = createCostTracker(client);
+      return await tracker.getDaily();
+    } finally {
+      await (client as unknown as { quit(): Promise<unknown> }).quit().catch(() => {});
+      (client as unknown as { disconnect(): void }).disconnect();
+    }
+  } catch {
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
   const entries = await loadEntries();
   if (entries.length === 0) {
@@ -313,6 +361,10 @@ async function main(): Promise<void> {
   }
   const report = computeReport(entries);
   printReport(report);
+  const costSnap = await loadCostSnapshot();
+  if (costSnap) {
+    printCostSnapshot(costSnap, report.totalPnl);
+  }
 }
 
 if (import.meta.main) {

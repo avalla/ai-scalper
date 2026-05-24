@@ -9,6 +9,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import { recordAnthropicResponseUsage } from "../observability/anthropic-usage";
 
 export interface MarketRegimeSnapshot {
   observedAt: string;
@@ -176,6 +177,9 @@ export async function getStrategyRecommendation(input: {
   apiKey?: string;
   model?: string;
   anthropicClient?: AnthropicClientLike;
+  costTracker?: { recordAnthropicCall(u: {
+    inputTokens: number; cachedTokens: number; outputTokens: number; model: string;
+  }): Promise<void> };
 }): Promise<AdvisorRecommendation> {
   const model = input.model ?? "claude-haiku-4-5-20251001";
   let client: AnthropicClientLike;
@@ -222,6 +226,8 @@ export async function getStrategyRecommendation(input: {
   } catch (err) {
     return safeDefault(err instanceof Error ? err.message : String(err));
   }
+
+  await recordAnthropicResponseUsage(input.costTracker, response, model);
 
   // Extract the tool_use block.
   const toolUse = response.content.find(

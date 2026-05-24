@@ -17,6 +17,7 @@
  *   per-strategy trade frequency.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { recordAnthropicResponseUsage } from "../observability/anthropic-usage";
 
 export type SupervisedStrategy =
   | "funding-arb"
@@ -55,6 +56,9 @@ export interface OrderSupervisorParams {
   model?: string;
   timeoutMs?: number;
   anthropicClient?: AnthropicClientLike;
+  costTracker?: { recordAnthropicCall(u: {
+    inputTokens: number; cachedTokens: number; outputTokens: number; model: string;
+  }): Promise<void> };
 }
 
 /** Minimal Anthropic surface — mockable in tests. */
@@ -267,6 +271,8 @@ export async function getOrderApproval(
     }
     return safeReject(`supervisor-error: ${msg}`);
   }
+
+  await recordAnthropicResponseUsage(params.costTracker, response, model);
 
   const toolUse = response.content.find(
     (block): block is { type: "tool_use"; name: string; input: unknown } =>

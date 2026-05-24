@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Scalper Trading Bot
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/opt/ai-scalper
+EnvironmentFile=/opt/ai-scalper/.env
+ExecStart=/usr/local/bin/bun run all
+Restart=on-failure
+RestartSec=10
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

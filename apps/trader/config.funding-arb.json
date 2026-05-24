@@ -10,7 +10,7 @@
     "requireLocalMaConfirmation": false
   },
   "entry": {
-    "executionMode": "maker-entry",
+    "executionMode": "maker-only-aggressive",
     "makerOffsetTicks": 1,
     "makerPollMs": 200,
     "makerTimeoutMs": 3000

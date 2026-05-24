@@ -49,7 +49,7 @@ function loadConfig(): TradingConfig {
 export interface TraderConfig {
   mode: "trade" | "scan";
   tradingProfile: "standard" | "aggressive-perps";
-  entryExecutionMode: "taker" | "maker-entry" | "maker-preferred-with-timeout";
+  entryExecutionMode: "taker" | "maker-entry" | "maker-preferred-with-timeout" | "maker-only-aggressive";
   entryMakerOffsetTicks: number;
   entryMakerPollMs: number;
   entryMakerTimeoutMs: number;

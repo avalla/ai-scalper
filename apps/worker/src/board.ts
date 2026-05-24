@@ -5,6 +5,8 @@ import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { ExpressAdapter } from "@bull-board/express/dist/index.js";
 import { QUEUE_NAMES } from "@ai-scalper/queueing";
 import { createRedisConnection } from "./redis";
+import { runHealthChecks } from "./health";
+import { resolve } from "node:path";
 
 const boardPort = Number(process.env.BULL_BOARD_PORT || "3010");
 const boardBasePath = process.env.BULL_BOARD_BASE_PATH || "/admin/queues";
@@ -57,6 +59,30 @@ async function main(): Promise<void> {
   });
 
   app.use(boardBasePath, serverAdapter.getRouter());
+
+  // /health — returns JSON with HTTP 200 if healthy, 503 if any check fails.
+  // Probes Redis + (optionally) Bybit + queue depth + kline freshness.
+  const scanLatestPath = process.env.SCAN_LATEST_PATH
+    ?? resolve(process.cwd(), "../trader/data/scan-latest.json");
+  app.get("/health", async (_req, res) => {
+    const queueRefs = queues;
+    const result = await runHealthChecks({
+      redis: connection as unknown as { ping(): Promise<string> },
+      queueLengths: async () => {
+        const out: Record<string, { waiting?: number; failed?: number }> = {};
+        for (const q of queueRefs) {
+          const [waiting, failed] = await Promise.all([
+            q.getWaitingCount().catch(() => 0),
+            q.getFailedCount().catch(() => 0),
+          ]);
+          out[q.name] = { waiting, failed };
+        }
+        return out;
+      },
+      scanLatestPath,
+    });
+    res.status(result.ok ? 200 : 503).json(result);
+  });
 
   app.listen(boardPort, () => {
     console.log(JSON.stringify({

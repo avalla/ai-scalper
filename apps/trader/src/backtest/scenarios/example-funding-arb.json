@@ -1,0 +1,21 @@
+{
+  "name": "funding-arb BTCUSDT 60m sample (v1 stub — strategy not yet wired)",
+  "strategyType": "funding-arb",
+  "symbol": "BTCUSDT",
+  "klineInterval": "60",
+  "startDate": "2026-04-01T00:00:00Z",
+  "endDate": "2026-05-01T00:00:00Z",
+  "strategyParams": {
+    "minAbsRateBps": 5,
+    "entryWindowMinutesBefore": 5,
+    "exitDelayMinutesAfter": 2
+  },
+  "riskParams": {
+    "orderUsd": 100,
+    "leverage": 5,
+    "stopLossBps": 30,
+    "takeProfitBps": 30,
+    "maxPositionUsd": 500,
+    "feeRoundTripBps": 11
+  }
+}
