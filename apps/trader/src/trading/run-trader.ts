@@ -3838,6 +3838,22 @@ export async function runTrader(config: TraderConfig): Promise<void> {
       state = rolloverDailyPnlIfNeeded(state, Date.now());
 
       // ── Strategy dispatch: non-MA strategies short-circuit the MA loop. ──
+      if (config.strategyType === "llm-managed" && config.llmManagedUseBullmqJobs) {
+        // Phase 1 PoC: trades are owned by the worker stack (open-decision
+        // + trade-management queues). Trader subprocess idles to keep the
+        // session-job alive without duplicating LLM calls or order
+        // placement.
+        if (ticks === 0) {
+          console.log(JSON.stringify({
+            ts: observedAt,
+            event: "llm-managed-bullmq-mode",
+            message: "trader subprocess idle; trades handled by worker queues",
+          }));
+        }
+        ticks += 1;
+        if (config.pollMs > 0) await sleep(config.pollMs);
+        continue;
+      }
       if (config.strategyType === "llm-managed") {
         const handled = await runLlmManagedTick({
           alerter,

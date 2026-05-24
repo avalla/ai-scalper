@@ -17,6 +17,61 @@ State of strategies in the bot. Each can be selected via `CONFIG_FILE=config.<na
 | 8 | LLM order supervisor | low-freq strategy config + `ANTHROPIC_API_KEY` + `ORDER_SUPERVISOR_ENABLED=true` | meta — pre-entry approval for funding-arb / basis-arb / pairs-trading / calendar-spread | ✅ **v1** | Opt-in. Calls Haiku before each ENTRY in supervised strategies (max ~8s blocking). Rejects entry if LLM disapproves OR confidence < `ORDER_SUPERVISOR_MIN_CONFIDENCE` (default 0.5). Exits/holds NOT supervised — deterministic. Fast strategies (`ma-crossover`, `longer-tf`, `bollinger-adx`) NOT supervised — latency would kill the setup. Safe-reject default on any failure (no key, timeout, SDK error). Cost ~$0.005-0.05/trade with prompt caching → ~$0.02-1.00/day. |
 | 9 | `llm-managed` | `config.llm-managed.json` + `ANTHROPIC_API_KEY` | fully autonomous LLM entry + active management | ✅ **v1** | Claude (Haiku 4.5) decides entry (`open` / `skip` every `openReviewIntervalSec`, default 10 min) AND active management every `manageReviewIntervalSec` (default 3 min): `hold`, `tp-partial`, `tp-full`, `cut-loss`, `open-hedge`, `close-hedge`, `scale-in`, `scale-out`. **Hardcoded safety rules bypass the LLM entirely**: (1) hard SL when PnL ≤ -`llmManagedMaxAbsoluteLossUsd` (default 20 USD) → forced `cut-loss`; (2) per-position max-loss breach → forced `cut-loss`; (3) `minutesHeld > llmManagedMaxHoldHours * 60` (default 24 h) → forced `tp-full`. Wallet / leverage / notional / hedge caps are clamped AFTER the LLM response. Symbol whitelist enforced — LLM-hallucinated symbols are rejected. 30-min cooldown after `cut-loss` before next OPEN decision. One position at a time in v1. Cost (Haiku 4.5 + prompt caching): ~$0.05–0.20 per call; worst-case at default intervals with an always-open position ≈ 30–40 calls/day → **$1.50–8/day**. |
 
+---
+
+## 🆕 Trade-as-BullMQ-Job migration (Phase 1 PoC — shipped behind flag)
+
+`llm-managed` is the PoC for a structural shift: each trade is a persisted
+BullMQ job in Redis rather than mutable state in the trader subprocess.
+Benefits:
+
+- Bot crash → BullMQ restarts the job from its persisted snapshot — no
+  orphan positions.
+- Each manage tick is a discrete worker invocation — no long-lived state
+  in trader memory.
+- Bull Board shows every live position (operator visibility).
+- 1-position-at-a-time enforced by querying the trade-management queue's
+  active/waiting/delayed counts (no dual-write hazards).
+- Cooldown after `cut-loss` lives in a Redis key — survives restart.
+
+### What ships in Phase 1
+
+- New queue names + job-data types in `@ai-scalper/queueing`:
+  `llm-managed:open-decision`, `llm-managed:trade-management`,
+  `LlmManagedOpenTickJobData`, `LlmManagedManageJobData`,
+  `LLM_MANAGED_JOB_POLICY` (attempts:1).
+- Shared Redis state helper
+  (`apps/trader/src/strategies/llm-managed-redis.ts`) for cross-process
+  cooldown + active-position counting.
+- Pure-and-DI'd processors in the trader package:
+  `llm-managed-open-processor.ts` + `llm-managed-manage-processor.ts`.
+- BullMQ Worker wiring (`apps/worker/src/llm-managed-workers.ts`) +
+  recurring open-tick upsert + Bull Board registration.
+- New config flag `llmManagedUseBullmqJobs` (default **false**, gated env
+  `LLM_MANAGED_USE_BULLMQ_JOBS=true`). When true, the in-process
+  `runLlmManagedTick` loop becomes a no-op (the trader subprocess just
+  idles until the session job exits — trades are owned by the workers).
+
+### Phase 2 (deferred)
+
+Migrate the remaining 7 strategies (ma-crossover, funding-arb, longer-tf,
+basis-arb, pairs-trading, bollinger-adx, calendar-spread) to the same
+pattern:
+
+- Per-strategy `open-decision` + `trade-management` queue pair (or a
+  single shared "strategy-tick" queue with discriminator in the job data).
+- Generic `StrategyManageJobData<TStrategy>` envelope.
+- Strategy-specific processors all sharing the same close-completes-job
+  semantics.
+- Keep the bandit/meta layer (`ma-crossover`) intact — it operates on
+  closed-position outcomes, which the new design preserves via
+  `position-ledger.appendClosedPosition`.
+
+Phase 2 is NOT scheduled until we have ≥1 week of live runs on the
+Phase 1 stack and confirm no regression vs. the in-process baseline.
+
+---
+
 ## 🚧 Next on roadmap
 
 ### #2 — Pairs trading BTC-ETH (medium priority)

@@ -12,13 +12,13 @@
     "accountType": "UNIFIED",
     "coin": "USDT",
     "fraction": 1,
-    "maxOrderUsdCap": 5
+    "maxOrderUsdCap": 3
   },
   "bybit": {
     "category": "linear",
     "symbol": "BTCUSDT",
     "pollMs": 10000,
-    "orderUsd": 5,
+    "orderUsd": 3,
     "leverage": 3,
     "slippageTolerancePercent": 0.1,
     "positionMode": "one-way",
@@ -28,11 +28,11 @@
     "allowedSymbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "NEARUSDT", "ONDOUSDT", "INJUSDT", "WLDUSDT", "ADAUSDT", "AVAXUSDT", "XRPUSDT"],
     "openReviewIntervalSec": 600,
     "manageReviewIntervalSec": 180,
-    "maxNotionalUsd": 20,
+    "maxNotionalUsd": 12,
     "maxLeverage": 5,
     "maxHoldHours": 12,
-    "maxAbsoluteLossUsd": 3,
-    "hedgeMaxNotionalUsd": 15,
+    "maxAbsoluteLossUsd": 2,
+    "hedgeMaxNotionalUsd": 10,
     "model": "claude-haiku-4-5-20251001",
     "timeoutMs": 15000,
     "postCutLossCooldownMs": 1800000

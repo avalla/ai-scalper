@@ -11,6 +11,8 @@ import {
 } from "@ai-scalper/queueing";
 import { createRedisConnection } from "./redis";
 import { summarizeTraderStdout } from "./trader-log-summary";
+import { readTraderConfig } from "../../trader/src/config";
+import { startLlmManagedWorkerStack, type LlmManagedWorkerStack } from "./llm-managed-workers";
 
 const scanJobTimeoutMs = Number(process.env.SCAN_JOB_TIMEOUT_MS || "30000");
 const scanScheduleEnabled = process.env.SCAN_SCHEDULE_ENABLED !== "false";
@@ -313,6 +315,8 @@ worker.on("failed", logFailure(QUEUE_NAMES.marketScan));
 paperSessionWorker.on("failed", logFailure(QUEUE_NAMES.paperSession));
 liveSessionWorker.on("failed", logFailure(QUEUE_NAMES.liveSession));
 
+let llmManagedStack: LlmManagedWorkerStack | null = null;
+
 async function main(): Promise<void> {
   await queue.waitUntilReady();
   await paperSessionQueue.waitUntilReady();
@@ -321,9 +325,36 @@ async function main(): Promise<void> {
   await paperSessionWorker.waitUntilReady();
   await liveSessionWorker.waitUntilReady();
 
+  const activeQueues: string[] = [
+    QUEUE_NAMES.marketScan, QUEUE_NAMES.paperSession, QUEUE_NAMES.liveSession,
+  ];
+
+  // ── Phase 1 PoC: llm-managed BullMQ workers (gated) ──────────────────
+  let llmManagedFlag = false;
+  try {
+    const traderConfig = readTraderConfig();
+    llmManagedFlag = traderConfig.strategyType === "llm-managed" && traderConfig.llmManagedUseBullmqJobs;
+    if (llmManagedFlag) {
+      llmManagedStack = await startLlmManagedWorkerStack({ connection, config: traderConfig });
+      activeQueues.push(
+        QUEUE_NAMES.llmManagedOpenDecision,
+        QUEUE_NAMES.llmManagedTradeManagement,
+      );
+      llmManagedStack.openWorker.on("failed", logFailure(QUEUE_NAMES.llmManagedOpenDecision));
+      llmManagedStack.manageWorker.on("failed", logFailure(QUEUE_NAMES.llmManagedTradeManagement));
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      event: "llm-managed-bullmq-bootstrap-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+
   console.log(JSON.stringify({
     event: "workers-ready",
-    queues: [QUEUE_NAMES.marketScan, QUEUE_NAMES.paperSession, QUEUE_NAMES.liveSession],
+    queues: activeQueues,
+    llmManagedBullmq: llmManagedFlag,
     scheduler: scanScheduleEnabled
       ? { enabled: true, runOnStart: scanScheduleRunOnStart, scheduleMinutes: scanScheduleMinutes }
       : { enabled: false },
@@ -365,6 +396,10 @@ async function shutdown(signal: string): Promise<void> {
     console.log(JSON.stringify({ event: "shutdown-progress", step: "paper-session-queue-closed" }));
     await liveSessionQueue.close();
     console.log(JSON.stringify({ event: "shutdown-progress", step: "live-session-queue-closed" }));
+    if (llmManagedStack) {
+      await llmManagedStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "llm-managed-stack-closed" }));
+    }
     await connection.quit();
     console.log(JSON.stringify({ event: "shutdown-complete" }));
   } catch (error) {

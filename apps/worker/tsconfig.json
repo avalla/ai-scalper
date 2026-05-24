@@ -1,11 +1,18 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "composite": true
+    "composite": true,
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
   "references": [
+    { "path": "../../packages/bybit-client" },
     { "path": "../../packages/market-scanner" },
-    { "path": "../../packages/queueing" }
+    { "path": "../../packages/queueing" },
+    { "path": "../../packages/trading-core" },
+    { "path": "../trader" }
   ]
 }

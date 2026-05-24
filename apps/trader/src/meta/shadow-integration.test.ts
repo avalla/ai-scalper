@@ -157,6 +157,7 @@ function makeConfig(): TraderConfig {
     llmManagedModel: "claude-haiku-4-5-20251001",
     llmManagedTimeoutMs: 15000,
     llmManagedPostCutLossCooldownMs: 1800000,
+    llmManagedUseBullmqJobs: false,
     basisArbEntryThresholdBps: 8,
     basisArbExitThresholdBps: 2,
     basisArbMaxNotionalUsd: 100,

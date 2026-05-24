@@ -15,6 +15,11 @@ function buildQueues() {
     new Queue(QUEUE_NAMES.marketScan, { connection }),
     new Queue(QUEUE_NAMES.paperSession, { connection }),
     new Queue(QUEUE_NAMES.liveSession, { connection }),
+    // Phase 1 PoC: llm-managed BullMQ migration. Always registered so the
+    // operator can see live trade-management jobs even when no positions
+    // are open (queues are auto-created the first time we read them).
+    new Queue(QUEUE_NAMES.llmManagedOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.llmManagedTradeManagement, { connection }),
   ];
 }
 

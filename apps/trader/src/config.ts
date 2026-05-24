@@ -111,6 +111,13 @@ export interface TraderConfig {
   llmManagedModel: string;
   llmManagedTimeoutMs: number;
   llmManagedPostCutLossCooldownMs: number;
+  /**
+   * Phase 1 PoC flag — when true, the in-process llm-managed loop in
+   * run-trader.ts becomes a no-op and the worker stack handles trades via
+   * the llmManagedOpenDecision + llmManagedTradeManagement queues.
+   * Defaults to false for backward compatibility.
+   */
+  llmManagedUseBullmqJobs: boolean;
   // Calendar-spread strategy parameters (perp vs dated quarterly futures)
   calendarPerpSymbol: string;
   calendarDatedSymbol: string;
@@ -405,6 +412,9 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     llmManagedPostCutLossCooldownMs: env.LLM_MANAGED_POST_CUT_LOSS_COOLDOWN_MS
       ? Number(env.LLM_MANAGED_POST_CUT_LOSS_COOLDOWN_MS)
       : ((cfg as { llmManaged?: { postCutLossCooldownMs?: number } }).llmManaged?.postCutLossCooldownMs ?? 1800000),
+    llmManagedUseBullmqJobs: env.LLM_MANAGED_USE_BULLMQ_JOBS
+      ? env.LLM_MANAGED_USE_BULLMQ_JOBS === "true"
+      : ((cfg as { llmManaged?: { useBullmqJobs?: boolean } }).llmManaged?.useBullmqJobs ?? false),
     calendarPerpSymbol: env.CALENDAR_PERP_SYMBOL
       ?? ((cfg as { calendarSpread?: { perpSymbol?: string } }).calendarSpread?.perpSymbol ?? "BTCUSDT"),
     calendarDatedSymbol: env.CALENDAR_DATED_SYMBOL
