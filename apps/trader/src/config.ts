@@ -1,13 +1,48 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
+import { dirname, join, isAbsolute } from 'node:path';
 import defaultConfig from '../config.json';
 
 type TradingConfig = typeof defaultConfig;
 
+/**
+ * Find a config file by searching in this order:
+ * 1. Absolute path → use it
+ * 2. <cwd>/<file>
+ * 3. Walk up from cwd looking for `apps/trader/<file>` (handles worker cwd)
+ * 4. Walk up from cwd looking for `<file>` next to a `bun.lock`
+ */
+function resolveConfigFile(name: string): string | null {
+  if (isAbsolute(name)) return existsSync(name) ? name : null;
+  const cwd = process.cwd();
+  const direct = join(cwd, name);
+  if (existsSync(direct)) return direct;
+  let dir = cwd;
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, 'apps', 'trader', name);
+    if (existsSync(candidate)) return candidate;
+    const sibling = join(dir, name);
+    if (existsSync(sibling) && existsSync(join(dir, 'bun.lock'))) return sibling;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 function loadConfig(): TradingConfig {
   const configFile = process.env.CONFIG_FILE;
   if (!configFile) return defaultConfig;
-  const resolved = configFile.startsWith('/') ? configFile : join(process.cwd(), configFile);
+  const resolved = resolveConfigFile(configFile);
+  if (!resolved) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      event: 'config-file-not-found',
+      configFile,
+      cwd: process.cwd(),
+      message: 'falling back to default config.json',
+    }));
+    return defaultConfig;
+  }
   return JSON.parse(readFileSync(resolved, 'utf8')) as TradingConfig;
 }
 
