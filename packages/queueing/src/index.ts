@@ -4,32 +4,32 @@ export const QUEUE_NAMES = {
   liveSession: "live-session",
   /**
    * Phase 1 (llm-managed PoC) — recurring open-tick lives here.
-   * One repeatable job ("llm-managed:open-tick") asks the LLM whether to
+   * One repeatable job ("llm-managed-open-tick") asks the LLM whether to
    * open a position every llmManagedOpenReviewIntervalSec.
    */
-  llmManagedOpenDecision: "llm-managed:open-decision",
+  llmManagedOpenDecision: "llm-managed-open-decision",
   /**
    * Phase 1 (llm-managed PoC) — one job per LIVE position. The job carries
    * the full LlmManagedManageJobData state and re-fires every
    * llmManagedManageReviewIntervalSec via BullMQ repeat options. Job
    * completes (no rescheduling) when the position is fully closed.
    */
-  llmManagedTradeManagement: "llm-managed:trade-management",
+  llmManagedTradeManagement: "llm-managed-trade-management",
   // ── Phase 2 — per-strategy open-decision + trade-management queues. ─────
-  fundingArbOpenDecision: "funding-arb:open-decision",
-  fundingArbTradeManagement: "funding-arb:trade-management",
-  longerTfOpenDecision: "longer-tf:open-decision",
-  longerTfTradeManagement: "longer-tf:trade-management",
-  bollingerAdxOpenDecision: "bollinger-adx:open-decision",
-  bollingerAdxTradeManagement: "bollinger-adx:trade-management",
-  basisArbOpenDecision: "basis-arb:open-decision",
-  basisArbTradeManagement: "basis-arb:trade-management",
-  pairsTradingOpenDecision: "pairs-trading:open-decision",
-  pairsTradingTradeManagement: "pairs-trading:trade-management",
-  calendarSpreadOpenDecision: "calendar-spread:open-decision",
-  calendarSpreadTradeManagement: "calendar-spread:trade-management",
-  maCrossoverOpenDecision: "ma-crossover:open-decision",
-  maCrossoverTradeManagement: "ma-crossover:trade-management",
+  fundingArbOpenDecision: "funding-arb-open-decision",
+  fundingArbTradeManagement: "funding-arb-trade-management",
+  longerTfOpenDecision: "longer-tf-open-decision",
+  longerTfTradeManagement: "longer-tf-trade-management",
+  bollingerAdxOpenDecision: "bollinger-adx-open-decision",
+  bollingerAdxTradeManagement: "bollinger-adx-trade-management",
+  basisArbOpenDecision: "basis-arb-open-decision",
+  basisArbTradeManagement: "basis-arb-trade-management",
+  pairsTradingOpenDecision: "pairs-trading-open-decision",
+  pairsTradingTradeManagement: "pairs-trading-trade-management",
+  calendarSpreadOpenDecision: "calendar-spread-open-decision",
+  calendarSpreadTradeManagement: "calendar-spread-trade-management",
+  maCrossoverOpenDecision: "ma-crossover-open-decision",
+  maCrossoverTradeManagement: "ma-crossover-trade-management",
 } as const;
 
 export const JOB_NAMES = {
@@ -37,24 +37,24 @@ export const JOB_NAMES = {
   paperSessionStart: "paper-session.start",
   liveSessionStart: "live-session.start",
   /** Recurring open-decision tick. Single deterministic jobId. */
-  llmManagedOpenTick: "llm-managed:open-tick",
+  llmManagedOpenTick: "llm-managed-open-tick",
   /** Per-position manage tick. jobId derived from the position id. */
-  llmManagedManageTick: "llm-managed:manage-tick",
+  llmManagedManageTick: "llm-managed-manage-tick",
   // ── Phase 2 — open/manage tick names per strategy. ─────────────────────
-  fundingArbOpenTick: "funding-arb:open-tick",
-  fundingArbManageTick: "funding-arb:manage-tick",
-  longerTfOpenTick: "longer-tf:open-tick",
-  longerTfManageTick: "longer-tf:manage-tick",
-  bollingerAdxOpenTick: "bollinger-adx:open-tick",
-  bollingerAdxManageTick: "bollinger-adx:manage-tick",
-  basisArbOpenTick: "basis-arb:open-tick",
-  basisArbManageTick: "basis-arb:manage-tick",
-  pairsTradingOpenTick: "pairs-trading:open-tick",
-  pairsTradingManageTick: "pairs-trading:manage-tick",
-  calendarSpreadOpenTick: "calendar-spread:open-tick",
-  calendarSpreadManageTick: "calendar-spread:manage-tick",
-  maCrossoverOpenTick: "ma-crossover:open-tick",
-  maCrossoverManageTick: "ma-crossover:manage-tick",
+  fundingArbOpenTick: "funding-arb-open-tick",
+  fundingArbManageTick: "funding-arb-manage-tick",
+  longerTfOpenTick: "longer-tf-open-tick",
+  longerTfManageTick: "longer-tf-manage-tick",
+  bollingerAdxOpenTick: "bollinger-adx-open-tick",
+  bollingerAdxManageTick: "bollinger-adx-manage-tick",
+  basisArbOpenTick: "basis-arb-open-tick",
+  basisArbManageTick: "basis-arb-manage-tick",
+  pairsTradingOpenTick: "pairs-trading-open-tick",
+  pairsTradingManageTick: "pairs-trading-manage-tick",
+  calendarSpreadOpenTick: "calendar-spread-open-tick",
+  calendarSpreadManageTick: "calendar-spread-manage-tick",
+  maCrossoverOpenTick: "ma-crossover-open-tick",
+  maCrossoverManageTick: "ma-crossover-manage-tick",
 } as const;
 
 export interface MarketScanJobData {

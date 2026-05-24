@@ -90,7 +90,7 @@ describe("processLongerTfOpenTick", () => {
       expect(r.takeProfitPrice).toBeGreaterThan(r.entryPrice);
     }
     expect(calls).toHaveLength(1);
-    expect(calls[0].n).toBe("longer-tf:manage-tick");
+    expect(calls[0].n).toBe("longer-tf-manage-tick");
   });
 
   test("skips when kline fetch fails", async () => {

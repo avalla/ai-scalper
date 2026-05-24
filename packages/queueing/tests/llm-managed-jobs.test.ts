@@ -9,10 +9,10 @@ import {
 
 describe("llm-managed queue/job name constants", () => {
   test("queue and job names exist and are unique", () => {
-    expect(QUEUE_NAMES.llmManagedOpenDecision).toBe("llm-managed:open-decision");
-    expect(QUEUE_NAMES.llmManagedTradeManagement).toBe("llm-managed:trade-management");
-    expect(JOB_NAMES.llmManagedOpenTick).toBe("llm-managed:open-tick");
-    expect(JOB_NAMES.llmManagedManageTick).toBe("llm-managed:manage-tick");
+    expect(QUEUE_NAMES.llmManagedOpenDecision).toBe("llm-managed-open-decision");
+    expect(QUEUE_NAMES.llmManagedTradeManagement).toBe("llm-managed-trade-management");
+    expect(JOB_NAMES.llmManagedOpenTick).toBe("llm-managed-open-tick");
+    expect(JOB_NAMES.llmManagedManageTick).toBe("llm-managed-manage-tick");
 
     // No duplicates across the constant tables.
     const queueValues = Object.values(QUEUE_NAMES);

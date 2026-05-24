@@ -66,7 +66,7 @@ describe("processPairsTradingOpenTick", () => {
       expect(r.hedgeRatio).toBe(1.1);
     }
     expect(calls).toHaveLength(1);
-    expect(calls[0].n).toBe("pairs-trading:manage-tick");
+    expect(calls[0].n).toBe("pairs-trading-manage-tick");
   });
 
   test("compensates leg1 when leg2 placement fails (live mode)", async () => {

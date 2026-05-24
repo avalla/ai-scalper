@@ -177,7 +177,7 @@ export async function startLlmManagedWorkerStack(deps: {
     },
     {
       ...LLM_MANAGED_JOB_POLICY,
-      jobId: "llm-managed:open-tick:recurring",
+      jobId: "llm-managed-open-tick-recurring",
       repeat: { every: config.llmManagedOpenReviewIntervalSec * 1000 },
     },
   );

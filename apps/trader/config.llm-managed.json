@@ -91,7 +91,8 @@
   },
   "runtime": {
     "artifactFlushTicks": 5,
-    "statePersistenceEnabled": true
+    "statePersistenceEnabled": true,
+    "useBullmqJobs": true 
   },
   "trailingStop": {
     "enabled": false,

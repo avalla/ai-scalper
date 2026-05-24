@@ -63,7 +63,7 @@ describe("processBasisArbOpenTick", () => {
       expect(r.entryBasisBps).toBeGreaterThan(8);
     }
     expect(calls).toHaveLength(1);
-    expect(calls[0].n).toBe("basis-arb:manage-tick");
+    expect(calls[0].n).toBe("basis-arb-manage-tick");
   });
 
   test("compensates leg1 when leg2 (spot) order placement fails (live mode)", async () => {

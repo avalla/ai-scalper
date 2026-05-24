@@ -179,7 +179,7 @@ describe("processLlmManagedOpenTick", () => {
       expect(result.leverage).toBe(5);     // maxLeverage from makeConfig
     }
     expect(deps._manage._added.length).toBe(1);
-    expect(deps._manage._added[0]!.name).toBe("llm-managed:manage-tick");
+    expect(deps._manage._added[0]!.name).toBe("llm-managed-manage-tick");
     expect(deps._manage._added[0]!.data.symbol).toBe("BTCUSDT");
     expect(deps._manage._added[0]!.data.positionId.startsWith("llm-managed-position:")).toBe(true);
   });

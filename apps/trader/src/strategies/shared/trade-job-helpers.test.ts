@@ -15,8 +15,8 @@ describe("trade-job-helpers", () => {
   });
 
   test("makeOpenTickJobId is constant per strategy (recurring dedup)", () => {
-    expect(makeOpenTickJobId("longer-tf")).toBe("longer-tf:open-tick:recurring");
-    expect(makeOpenTickJobId("ma-crossover")).toBe("ma-crossover:open-tick:recurring");
+    expect(makeOpenTickJobId("longer-tf")).toBe("longer-tf-open-tick-recurring");
+    expect(makeOpenTickJobId("ma-crossover")).toBe("ma-crossover-open-tick-recurring");
   });
 
   test("appendDecisionHistory preserves order and caps at the configured limit", () => {

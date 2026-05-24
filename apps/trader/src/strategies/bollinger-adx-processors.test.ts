@@ -77,7 +77,7 @@ describe("processBollingerAdxOpenTick", () => {
       expect(r.stopLossPrice).toBeLessThan(r.entryPrice);
     }
     expect(calls).toHaveLength(1);
-    expect(calls[0].n).toBe("bollinger-adx:manage-tick");
+    expect(calls[0].n).toBe("bollinger-adx-manage-tick");
   });
 
   test("skips when injected decideFn returns hold (no enter)", async () => {

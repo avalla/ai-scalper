@@ -41,7 +41,7 @@ export function makePositionId(params: {
  * exactly one such job per strategy, so jobId is constant.
  */
 export function makeOpenTickJobId(strategy: string): string {
-  return `${strategy}:open-tick:recurring`;
+  return `${strategy}-open-tick-recurring`;
 }
 
 /**

@@ -137,7 +137,7 @@ describe("processFundingArbOpenTick", () => {
     }
     expect(deps._manage.calls).toHaveLength(1);
     const c = deps._manage.calls[0]!;
-    expect(c.name).toBe("funding-arb:manage-tick");
+    expect(c.name).toBe("funding-arb-manage-tick");
     expect(c.data.side).toBe("short");
     expect((c.opts as any).jobId).toContain("funding-arb-position:");
     expect((c.opts as any).repeat.every).toBeGreaterThan(0);

@@ -108,7 +108,7 @@ describe("processMaCrossoverOpenTick", () => {
       expect(r.takeProfitPrice).toBeGreaterThan(r.entryPrice);
     }
     expect(calls).toHaveLength(1);
-    expect(calls[0].n).toBe("ma-crossover:manage-tick");
+    expect(calls[0].n).toBe("ma-crossover-manage-tick");
     expect(calls[0].d.championIdAtEntry).toBe("test-variant");
     expect(calls[0].d.championParams).toEqual({
       fastWindow: 3, slowWindow: 5, thresholdBps: 0, stopLossBps: 50, takeProfitBps: 100,
