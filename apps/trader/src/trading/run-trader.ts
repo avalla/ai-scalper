@@ -5,6 +5,10 @@ import {
   type PositionInfo,
   type RealtimeOrder,
 } from "@ai-scalper/bybit-client";
+import { createRestTickerSource } from "@ai-scalper/bybit-client/ticker-source";
+import IORedis from "ioredis";
+import { createRedisLiquidationsReader } from "../strategies/liquidations-cache-reader";
+import { runLiquidationCascadeTick } from "./liquidation-cascade-tick";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -3708,6 +3712,10 @@ export async function runTrader(config: TraderConfig): Promise<void> {
 
   const client = createBybitClient();
   const positionLedger = createPositionLedger();
+  // Lazy — only constructed if strategyType === "liquidation-cascade" and useWebSocket=true.
+  let liquidationCascadeRedis: IORedis | null = null;
+  let liquidationCascadeReader: ReturnType<typeof createRedisLiquidationsReader> | null = null;
+  let liquidationCascadeTickerSource: ReturnType<typeof createRestTickerSource> | null = null;
   const scanConfig = readScanConfig(process.env);
   // Plumb TraderConfig JSON fields that the scanner needs but readScanConfig
   // only reads from env. JSON values win unless env explicitly overrode them.
@@ -3928,25 +3936,70 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         continue;
       }
 
-      // ── liquidation-cascade dispatch (Phase 2 v1):
+      // ── liquidation-cascade dispatch (Phase 2 v1, live tick):
       //    The pure decision lives in strategies/liquidation-cascade.ts.
-      //    Live wiring requires the WS feeder (publicTrade + Redis
-      //    LiquidationsCache). Until the full open/manage loop lands,
-      //    we idle the subprocess with a clear warning so operators can
-      //    select the strategy in config without crashing the runner.
+      //    The live tick requires the WS feeder running (publicTrade +
+      //    Redis LiquidationsCache) so `liquidationsReader.getRecent`
+      //    returns real prints. Without `useWebSocket=true` we keep the
+      //    subprocess idle + warn.
       if (config.strategyType === "liquidation-cascade") {
-        if (ticks === 0) {
+        if (!config.useWebSocket) {
+          if (ticks === 0) {
+            console.log(JSON.stringify({
+              ts: observedAt,
+              event: "liquidation-cascade-dispatch",
+              message: "liquidation-cascade requires runtime.useWebSocket=true — trader idle",
+              useWebSocket: false,
+            }));
+          }
+          ticks += 1;
+          if (config.pollMs > 0) await sleep(config.pollMs);
+          continue;
+        }
+
+        if (!liquidationCascadeRedis) {
+          const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+          liquidationCascadeRedis = new IORedis(redisUrl, { maxRetriesPerRequest: null });
+          liquidationCascadeReader = createRedisLiquidationsReader(liquidationCascadeRedis);
+          liquidationCascadeTickerSource = createRestTickerSource(client, { defaultCategory: config.category });
           console.log(JSON.stringify({
             ts: observedAt,
             event: "liquidation-cascade-dispatch",
-            message: config.useWebSocket
-              ? "liquidation-cascade selected; full WS-driven tick wiring is deferred — trader idle"
-              : "liquidation-cascade requires runtime.useWebSocket=true — trader idle",
-            useWebSocket: config.useWebSocket,
+            message: "liquidation-cascade live tick active",
+            allowedSymbols: config.liquidationAllowedSymbols,
+            windowMs: config.liquidationWindowMs,
+            checkIntervalMs: config.liquidationCheckIntervalMs,
           }));
         }
+
+        try {
+          await runLiquidationCascadeTick({
+            config,
+            client,
+            tickerSource: liquidationCascadeTickerSource!,
+            alerter,
+            liquidationsReader: liquidationCascadeReader!,
+            positionLedger,
+            stateRef: {
+              get: () => state,
+              set: (v) => { state = v; },
+            },
+            openPositionSymbolRef: {
+              get: () => openPositionSymbol,
+              set: (v) => { openPositionSymbol = v; },
+            },
+          });
+        } catch (err) {
+          console.error(JSON.stringify({
+            ts: observedAt,
+            event: "liquidation-cascade-tick-error",
+            error: err instanceof Error ? err.message : String(err),
+          }));
+        }
+
         ticks += 1;
-        if (config.pollMs > 0) await sleep(config.pollMs);
+        const sleepMs = Math.max(config.liquidationCheckIntervalMs, config.pollMs);
+        if (sleepMs > 0) await sleep(sleepMs);
         continue;
       }
 
