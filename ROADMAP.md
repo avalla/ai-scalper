@@ -43,12 +43,44 @@ and multi-symbol fan-out over a single connection.
   every `apps/trader/config*.json`; mirrored as `USE_WEBSOCKET=true`
   to spawn the feeder from `start-stack`
 
-**Phase 2 (pending, not in this drop):**
-- Migrate per-strategy `getTicker` call sites (40+) to the shared cache
-- Subscribe to `orderbook.*` (orderbook strategies, smarter maker quoting)
-- Subscribe to `publicTrade.*` (planned liquidation strategy)
+**Phase 2 (partially shipped):**
+
+Shipped in this drop:
+- `packages/bybit-client/src/ticker-source.ts` — unified `TickerSource`
+  abstraction with two implementations:
+  - `createRestTickerSource(client)` — pure REST passthrough (default).
+  - `createCachedTickerSource({cache, fallback, defaultMaxAgeMs})` —
+    reads the WS-fed Redis cache; falls back to REST when the cached
+    entry is missing or older than `maxAgeMs` (default 5 s). Stale-
+    fallback warnings are throttled to once per minute per symbol.
+- `packages/bybit-client/src/ws.ts` extended with `orderbook.50.*` and
+  `publicTrade.*` topic support — `subscribeOrderbook`, `getCachedOrderbook`,
+  `onOrderbook`, `subscribePublicTrade`, `onPublicTrade`. Delta merge with
+  `size="0"` removal semantics. Re-subscribe-on-reconnect covers all three
+  feed types.
+- `packages/bybit-client/src/ws-redis-orderbook-cache.ts` — Redis-backed
+  `SharedOrderbookCache` parallel to `SharedTickerCache`.
+- `apps/trader/src/strategies/liquidation-cascade.ts` — pure-logic
+  rolling-window cluster detector. Liquidation `side="Sell"` (longs
+  liquidated) → enter LONG; `side="Buy"` (shorts liquidated) → enter
+  SHORT. Picks the largest cluster across symbols.
+
+Deferred (Phase 2 continuation):
+- Mass migration of the 40+ `client.getTicker` call sites across the
+  trader subprocess and the 8 manage/open processors to the new
+  `TickerSource`. The abstraction is now in place — adoption can land
+  incrementally, file-by-file, without breaking the `useWebSocket=false`
+  path.
+- ws-feeder integration of `orderbookSymbols` / `publicTradeSymbols`
+  env (WS_ORDERBOOK_SYMBOLS, WS_PUBLIC_TRADE_SYMBOLS) and
+  publish-to-Redis loop. The client + cache primitives are ready.
+- `liquidation-cascade` dispatch wiring (in-process tick + BullMQ job
+  pattern) and config flag + JSON section.
+- Health endpoint WS stats (connection alive, last message age,
+  reconnect count in last hour).
 - Move private WS (positions, executions, orders) onto an authenticated
-  stream
+  stream.
+- Maker-only execution using real-time orderbook (Phase 3).
 
 ## ✅ Shipped
 

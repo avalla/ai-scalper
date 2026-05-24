@@ -5,7 +5,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./ws": "./src/ws.ts",
-    "./ws-redis-cache": "./src/ws-redis-cache.ts"
+    "./ws-redis-cache": "./src/ws-redis-cache.ts",
+    "./ticker-source": "./src/ticker-source.ts",
+    "./ws-redis-orderbook-cache": "./src/ws-redis-orderbook-cache.ts"
   },
   "peerDependencies": {
     "ioredis": "^5.0.0"
