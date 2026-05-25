@@ -30,6 +30,7 @@ import {
   createRedisLiquidationsCache,
   type LiquidationsCache,
 } from "./liquidations-cache";
+import { writeWsHeartbeat } from "./ws-heartbeat";
 
 export interface WsFeederOptions {
   symbols: string[];                 // ticker symbols (back-compat)
@@ -60,6 +61,7 @@ export interface WsFeederHandle {
 }
 
 const DEFAULT_LIQ_WINDOW_MS = 5 * 60 * 1000;
+const HEARTBEAT_INTERVAL_MS = 5_000;
 
 const defaultLog = (row: Record<string, unknown>) => {
   process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), ...row }) + "\n");
@@ -130,6 +132,22 @@ export function createWsFeeder(opts: WsFeederOptions): WsFeederHandle {
     }
   });
 
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function publishHeartbeat(): Promise<void> {
+    try {
+      const stats = client.getStats();
+      await writeWsHeartbeat(opts.redis, {
+        lastMessageAt: stats.lastMessageAt ?? 0,
+        reconnects: stats.reconnects,
+        isConnected: client.isConnected(),
+        writtenAt: Date.now(),
+      }, { keyPrefix: opts.keyPrefix });
+    } catch (err) {
+      log({ event: "ws-feeder-heartbeat-failed", err: String(err) });
+    }
+  }
+
   return {
     client,
     cache: tickerCache,
@@ -156,9 +174,13 @@ export function createWsFeeder(opts: WsFeederOptions): WsFeederHandle {
         await client.subscribePublicTrade(symbol);
       }
       log({ event: "ws-feeder-ready", subscriptions: client.getSubscriptions() });
+      // Kick off the heartbeat publisher.
+      await publishHeartbeat();
+      heartbeatTimer = setInterval(() => { void publishHeartbeat(); }, HEARTBEAT_INTERVAL_MS);
     },
     async stop() {
       log({ event: "ws-feeder-stopping" });
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
       await client.stop();
       await tickerCache.close();
       await orderbookCache.close();

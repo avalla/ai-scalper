@@ -7,6 +7,7 @@
 import { readFile } from "node:fs/promises";
 import { resolveProjectPath } from "@ai-scalper/trading-core";
 import type { createBybitClient } from "@ai-scalper/bybit-client";
+import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type {
   MarketRegimeSnapshot,
   RecentStrategyPerformance,
@@ -29,6 +30,7 @@ function safeNumber(s: string | undefined): number {
 
 export async function collectRegime(deps: {
   client: BybitClient;
+  tickerSource: TickerSource;
   scanLatestPath?: string;
   observedAt?: string;
 }): Promise<MarketRegimeSnapshot> {
@@ -42,7 +44,7 @@ export async function collectRegime(deps: {
 
   // BTC perp ticker (also gives prevPrice1h).
   try {
-    const btcPerp = await deps.client.getTicker({ category: "linear", symbol: "BTCUSDT" });
+    const btcPerp = await deps.tickerSource.getTicker("BTCUSDT", { category: "linear" });
     btcPrice = safeNumber(btcPerp.lastPrice);
     const prev1h = safeNumber(btcPerp.prevPrice1h);
     if (prev1h > 0 && btcPrice > 0) {
@@ -50,7 +52,7 @@ export async function collectRegime(deps: {
     }
     // BTC spot for basis.
     try {
-      const btcSpot = await deps.client.getTicker({ category: "spot", symbol: "BTCUSDT" });
+      const btcSpot = await deps.tickerSource.getTicker("BTCUSDT", { category: "spot" });
       const spotPrice = safeNumber(btcSpot.lastPrice);
       if (spotPrice > 0) {
         spotPerpBasisBps = ((btcPrice - spotPrice) / spotPrice) * 10_000;

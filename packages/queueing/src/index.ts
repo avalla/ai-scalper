@@ -30,6 +30,8 @@ export const QUEUE_NAMES = {
   calendarSpreadTradeManagement: "calendar-spread-trade-management",
   maCrossoverOpenDecision: "ma-crossover-open-decision",
   maCrossoverTradeManagement: "ma-crossover-trade-management",
+  liquidationCascadeOpenDecision: "liquidation-cascade-open-decision",
+  liquidationCascadeTradeManagement: "liquidation-cascade-trade-management",
 } as const;
 
 export const JOB_NAMES = {
@@ -55,6 +57,8 @@ export const JOB_NAMES = {
   calendarSpreadManageTick: "calendar-spread-manage-tick",
   maCrossoverOpenTick: "ma-crossover-open-tick",
   maCrossoverManageTick: "ma-crossover-manage-tick",
+  liquidationCascadeOpenTick: "liquidation-cascade-open-tick",
+  liquidationCascadeManageTick: "liquidation-cascade-manage-tick",
 } as const;
 
 export interface MarketScanJobData {
@@ -367,6 +371,31 @@ export interface MaCrossoverManageJobData {
   stopLossPrice: number;
   takeProfitPrice: number;
   entryReasoning: string;
+  decisionsHistory: StrategyDecisionRow[];
+  lastReviewAt: string;
+}
+
+// liquidation-cascade (single-leg, cluster-trigger mean-reversion)
+export interface LiquidationCascadeOpenTickJobData {
+  triggeredAt: string;
+  configFile: string;
+}
+
+export interface LiquidationCascadeManageJobData {
+  positionId: string;
+  symbol: string;
+  side: "long" | "short";
+  qty: number;
+  qtyStep: string;
+  minOrderQty: string;
+  entryPrice: number;
+  notionalUsd: number;
+  leverage: number;
+  openedAt: string;
+  stopLossPrice: number;
+  takeProfitPrice: number;
+  /** Time-based exit horizon (seconds since open). */
+  maxHoldSec: number;
   decisionsHistory: StrategyDecisionRow[];
   lastReviewAt: string;
 }

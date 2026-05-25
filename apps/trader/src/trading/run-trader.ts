@@ -5,7 +5,7 @@ import {
   type PositionInfo,
   type RealtimeOrder,
 } from "@ai-scalper/bybit-client";
-import { createRestTickerSource } from "@ai-scalper/bybit-client/ticker-source";
+import { createRestTickerSource, type TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import IORedis from "ioredis";
 import { createRedisLiquidationsReader } from "../strategies/liquidations-cache-reader";
 import { runLiquidationCascadeTick } from "./liquidation-cascade-tick";
@@ -1738,6 +1738,7 @@ async function runBasisArbTick(params: {
  */
 async function collectLlmMarketContext(
   client: ReturnType<typeof createBybitClient>,
+  tickerSource: TickerSource,
   observedAt: string,
 ): Promise<LlmManagedMarketContext> {
   const ctx: LlmManagedMarketContext = {
@@ -1750,7 +1751,7 @@ async function collectLlmMarketContext(
     topRankedSetups: [],
   };
   try {
-    const t = await client.getTicker({ category: "linear", symbol: "BTCUSDT" });
+    const t = await tickerSource.getTicker("BTCUSDT", { category: "linear" });
     const last = Number(t.lastPrice);
     const prev1h = Number(t.prevPrice1h);
     const prev24h = Number(t.prevPrice24h);
@@ -1768,7 +1769,7 @@ async function collectLlmMarketContext(
   }
   // Spot-perp basis (BTC).
   try {
-    const spot = await client.getTicker({ category: "spot", symbol: "BTCUSDT" });
+    const spot = await tickerSource.getTicker("BTCUSDT", { category: "spot" });
     const spotLast = Number(spot.lastPrice);
     if (Number.isFinite(spotLast) && spotLast > 0 && ctx.btcPrice > 0) {
       ctx.spotPerpBasisBps = ((ctx.btcPrice - spotLast) / spotLast) * 10_000;
@@ -2180,6 +2181,7 @@ async function executeLlmManagedAction(args: {
 async function runLlmManagedTick(params: {
   alerter: WebhookAlerter;
   client: ReturnType<typeof createBybitClient>;
+  tickerSource: TickerSource;
   config: TraderConfig;
   observedAt: string;
   positionRef: MutableRef<LlmManagedPosition | null>;
@@ -2192,14 +2194,14 @@ async function runLlmManagedTick(params: {
   toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
 }): Promise<{ shouldContinueLoop: boolean }> {
   const {
-    alerter, client, config, observedAt,
+    alerter, client, tickerSource, config, observedAt,
     positionRef, lastOpenDecisionAtRef, lastManageDecisionAtRef, lastCutLossAtRef,
     openPositionSymbolRef, positionLedger, stateRef, toPersistedTraderSnapshot,
   } = params;
   const now = Date.now();
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
 
-  const market = await collectLlmMarketContext(client, observedAt);
+  const market = await collectLlmMarketContext(client, tickerSource, observedAt);
   const pos = positionRef.get();
 
   // ─────────────────────────── OPEN-DECISION MODE ──────────────────────────
@@ -3711,6 +3713,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
   process.once("SIGTERM", onShutdownSignal);
 
   const client = createBybitClient();
+  const tickerSource: TickerSource = createRestTickerSource(client, { defaultCategory: config.category });
   const positionLedger = createPositionLedger();
   // Lazy — only constructed if strategyType === "liquidation-cascade" and useWebSocket=true.
   let liquidationCascadeRedis: IORedis | null = null;
@@ -4024,6 +4027,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
         const handled = await runLlmManagedTick({
           alerter,
           client,
+          tickerSource,
           config,
           observedAt,
           positionRef: {

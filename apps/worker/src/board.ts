@@ -5,8 +5,11 @@ import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { ExpressAdapter } from "@bull-board/express/dist/index.js";
 import { QUEUE_NAMES } from "@ai-scalper/queueing";
 import { createRedisConnection } from "./redis";
-import { runHealthChecks } from "./health";
+import { runHealthChecks, type WsHealthProbe } from "./health";
+import { readWsHeartbeat, type WsHeartbeat } from "./ws-heartbeat";
 import { resolve } from "node:path";
+
+const WS_HEARTBEAT_STALE_MS = 30_000;
 
 const boardPort = Number(process.env.BULL_BOARD_PORT || "3010");
 const boardBasePath = process.env.BULL_BOARD_BASE_PATH || "/admin/queues";
@@ -38,6 +41,8 @@ function buildQueues() {
     new Queue(QUEUE_NAMES.calendarSpreadTradeManagement, { connection }),
     new Queue(QUEUE_NAMES.maCrossoverOpenDecision, { connection }),
     new Queue(QUEUE_NAMES.maCrossoverTradeManagement, { connection }),
+    new Queue(QUEUE_NAMES.liquidationCascadeOpenDecision, { connection }),
+    new Queue(QUEUE_NAMES.liquidationCascadeTradeManagement, { connection }),
   ];
 }
 
@@ -66,6 +71,26 @@ async function main(): Promise<void> {
     ?? resolve(process.cwd(), "../trader/data/scan-latest.json");
   app.get("/health", async (_req, res) => {
     const queueRefs = queues;
+    let heartbeat: WsHeartbeat | null = null;
+    try {
+      heartbeat = await readWsHeartbeat(connection as unknown as Parameters<typeof readWsHeartbeat>[0]);
+    } catch {
+      heartbeat = null;
+    }
+    const now = Date.now();
+    const heartbeatFresh = heartbeat !== null && now - heartbeat.writtenAt <= WS_HEARTBEAT_STALE_MS;
+    const wsProbe: WsHealthProbe = heartbeatFresh
+      ? {
+          isConnected: () => heartbeat!.isConnected,
+          lastMessageAt: () => heartbeat!.lastMessageAt > 0 ? heartbeat!.lastMessageAt : null,
+          reconnectsLastHour: () => heartbeat!.reconnects,
+        }
+      : {
+          // Missing or stale heartbeat → force ws.ok=false.
+          isConnected: () => false,
+          lastMessageAt: () => null,
+          reconnectsLastHour: () => 0,
+        };
     const result = await runHealthChecks({
       redis: connection as unknown as { ping(): Promise<string> },
       queueLengths: async () => {
@@ -79,6 +104,7 @@ async function main(): Promise<void> {
         }
         return out;
       },
+      ws: wsProbe,
       scanLatestPath,
     });
     res.status(result.ok ? 200 : 503).json(result);

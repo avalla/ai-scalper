@@ -20,6 +20,7 @@ import { startBasisArbWorkerStack, type BasisArbWorkerStack } from "./basis-arb-
 import { startPairsTradingWorkerStack, type PairsTradingWorkerStack } from "./pairs-trading-workers";
 import { startCalendarSpreadWorkerStack, type CalendarSpreadWorkerStack } from "./calendar-spread-workers";
 import { startMaCrossoverWorkerStack, type MaCrossoverWorkerStack } from "./ma-crossover-workers";
+import { startLiquidationCascadeWorkerStack, type LiquidationCascadeWorkerStack } from "./liquidation-cascade-workers";
 
 const scanJobTimeoutMs = Number(process.env.SCAN_JOB_TIMEOUT_MS || "30000");
 const scanScheduleEnabled = process.env.SCAN_SCHEDULE_ENABLED !== "false";
@@ -330,6 +331,7 @@ let basisArbStack: BasisArbWorkerStack | null = null;
 let pairsTradingStack: PairsTradingWorkerStack | null = null;
 let calendarSpreadStack: CalendarSpreadWorkerStack | null = null;
 let maCrossoverStack: MaCrossoverWorkerStack | null = null;
+let liquidationCascadeStack: LiquidationCascadeWorkerStack | null = null;
 
 async function main(): Promise<void> {
   await queue.waitUntilReady();
@@ -369,7 +371,7 @@ async function main(): Promise<void> {
   try {
     const cfg = readTraderConfig();
     const startStack = async <S>(params: {
-      strategy: "funding-arb" | "longer-tf" | "bollinger-adx" | "basis-arb" | "pairs-trading" | "calendar-spread" | "ma-crossover";
+      strategy: "funding-arb" | "longer-tf" | "bollinger-adx" | "basis-arb" | "pairs-trading" | "calendar-spread" | "ma-crossover" | "liquidation-cascade";
       flag: boolean;
       openQ: string; manageQ: string;
       start: () => Promise<S>;
@@ -426,6 +428,12 @@ async function main(): Promise<void> {
       openQ: QUEUE_NAMES.maCrossoverOpenDecision, manageQ: QUEUE_NAMES.maCrossoverTradeManagement,
       start: () => startMaCrossoverWorkerStack({ connection, config: cfg }),
       assign: (s) => { maCrossoverStack = s; },
+    });
+    await startStack({
+      strategy: "liquidation-cascade", flag: useBullmq,
+      openQ: QUEUE_NAMES.liquidationCascadeOpenDecision, manageQ: QUEUE_NAMES.liquidationCascadeTradeManagement,
+      start: () => startLiquidationCascadeWorkerStack({ connection, config: cfg }),
+      assign: (s) => { liquidationCascadeStack = s; },
     });
   } catch (err) {
     console.warn(JSON.stringify({
@@ -511,6 +519,10 @@ async function shutdown(signal: string): Promise<void> {
     if (maCrossoverStack) {
       await maCrossoverStack.shutdown();
       console.log(JSON.stringify({ event: "shutdown-progress", step: "ma-crossover-stack-closed" }));
+    }
+    if (liquidationCascadeStack) {
+      await liquidationCascadeStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "liquidation-cascade-stack-closed" }));
     }
     await connection.quit();
     console.log(JSON.stringify({ event: "shutdown-complete" }));

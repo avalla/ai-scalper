@@ -7,6 +7,12 @@
 
 import IORedis from "ioredis";
 import { createBybitClient } from "@ai-scalper/bybit-client";
+import {
+  createCachedTickerSource,
+  createRestTickerSource,
+  type TickerSource,
+} from "@ai-scalper/bybit-client/ticker-source";
+import { createRedisTickerCache } from "@ai-scalper/bybit-client/ws-redis-cache";
 import { resolveProjectPath } from "@ai-scalper/trading-core";
 import { createWebhookAlerter } from "../alerts/webhook";
 import { readTraderConfig } from "../config";
@@ -47,6 +53,14 @@ async function main(): Promise<void> {
     redis = null;
   }
 
+  const tickerSource: TickerSource = config.useWebSocket && redis
+    ? createCachedTickerSource({
+        cache: createRedisTickerCache(redis),
+        fallback: client,
+        defaultMaxAgeMs: 5_000,
+      })
+    : createRestTickerSource(client);
+
   const webhook = createWebhookAlerter(config.alertWebhookUrl);
   const outputPath = resolveProjectPath("apps/trader/data/runtime/strategy-advisor.json");
 
@@ -65,7 +79,7 @@ async function main(): Promise<void> {
       alertWebhookUrl: config.alertWebhookUrl,
       outputPath,
     },
-    collectRegime: () => collectRegime({ client }),
+    collectRegime: () => collectRegime({ client, tickerSource }),
     collectPerformance: () => collectPerformance({ redis }),
     postWebhook: (msg, ctx) => webhook.send(msg, ctx),
     shouldStop: () => stopRequested,
