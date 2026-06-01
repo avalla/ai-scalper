@@ -7,6 +7,7 @@
     "enqueue:scan": "bun --env-file ../../.env src/enqueue-market-scan.ts",
     "enqueue:session": "bun --env-file ../../.env src/enqueue-trader-session.ts",
     "up": "bun --env-file ../../.env src/start-stack.ts",
+    "up:multi": "bun --env-file ../../.env src/start-multi-strategy.ts",
     "board": "bun --env-file ../../.env src/board.ts"
   },
   "dependencies": {

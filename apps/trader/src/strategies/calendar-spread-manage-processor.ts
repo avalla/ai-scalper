@@ -13,7 +13,7 @@ import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { CalendarSpreadManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
-import { calendarDecide, computeCalendarSpreadBps } from "./calendar-spread";
+import { calendarDecide, computeCalendarSpreadBps, type CalendarDecision } from "./calendar-spread";
 import type { StrategySharedState } from "./shared/bullmq-shared-state";
 import { appendDecisionHistory } from "./shared/trade-job-helpers";
 import type { ClosedPositionLedgerEntry } from "../trading/position-ledger";
@@ -94,24 +94,42 @@ export async function processCalendarSpreadManageTick(
     return { status: "continue", updatedData: { ...jobData, lastReviewAt: observedAt } };
   }
 
-  // (3) decide
-  const decision = decideFn({
-    perpPrice, datedPrice,
-    datedDeliveryAt: jobData.datedDeliveryAt, now,
-    position: {
-      perpSide: jobData.perpSide, datedSide: jobData.datedSide,
-      perpEntryPrice: jobData.perpEntryPrice, datedEntryPrice: jobData.datedEntryPrice,
-      qty: jobData.qty,
-      entrySpreadBps: jobData.entrySpreadBps,
-      entryAt: new Date(jobData.openedAt).getTime(),
-      datedDeliveryAt: jobData.datedDeliveryAt,
-    },
-    config: {
-      entryThresholdBps: config.calendarEntryThresholdBps,
-      exitThresholdBps: config.calendarExitThresholdBps,
-      preSettlementCloseHours: config.calendarPreSettlementCloseHours,
-    },
-  });
+  // (3a) divergence-stop guard — leveraged-trading safety net.
+  // If the spread has WIDENED beyond the configured tolerance vs the entry,
+  // close immediately rather than wait for convergence. Skip when disabled (0)
+  // or when the position was opened at 1x leverage AND user didn't set a stop.
+  const currentSpreadBps = computeCalendarSpreadBps(perpPrice, datedPrice);
+  const widenedBps = Math.abs(currentSpreadBps) - Math.abs(jobData.entrySpreadBps);
+  const divergenceStopBps = config.calendarSpreadDivergenceStopBps;
+  let decision: CalendarDecision;
+  if (divergenceStopBps > 0 && widenedBps > divergenceStopBps) {
+    log({
+      ts: observedAt, event: "calendar-spread-divergence-stop",
+      positionId: jobData.positionId,
+      entrySpreadBps: jobData.entrySpreadBps, currentSpreadBps,
+      widenedBps, divergenceStopBps,
+    });
+    decision = { kind: "exit", reason: "divergence-stop", currentSpreadBps };
+  } else {
+    // (3b) normal decide
+    decision = decideFn({
+      perpPrice, datedPrice,
+      datedDeliveryAt: jobData.datedDeliveryAt, now,
+      position: {
+        perpSide: jobData.perpSide, datedSide: jobData.datedSide,
+        perpEntryPrice: jobData.perpEntryPrice, datedEntryPrice: jobData.datedEntryPrice,
+        qty: jobData.qty,
+        entrySpreadBps: jobData.entrySpreadBps,
+        entryAt: new Date(jobData.openedAt).getTime(),
+        datedDeliveryAt: jobData.datedDeliveryAt,
+      },
+      config: {
+        entryThresholdBps: config.calendarEntryThresholdBps,
+        exitThresholdBps: config.calendarExitThresholdBps,
+        preSettlementCloseHours: config.calendarPreSettlementCloseHours,
+      },
+    });
+  }
 
   if (decision.kind === "hold") {
     return {

@@ -13,6 +13,7 @@
 
 import type { createBybitClient } from "@ai-scalper/bybit-client";
 import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
+import type { PositionSource } from "@ai-scalper/bybit-client/position-source";
 import type { FundingArbManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
@@ -31,6 +32,13 @@ export interface FundingArbManageProcessorDeps {
   config: TraderConfig;
   client: BybitClient;
   tickerSource: TickerSource;
+  /**
+   * Optional source for the position-reconcile step. When provided, used
+   * instead of `client.getPosition` directly; this allows substituting a
+   * WS-private-cached source with REST fallback. Falls back to a REST
+   * passthrough on the existing client when omitted.
+   */
+  positionSource?: PositionSource;
   alerter: WebhookAlerter;
   sharedState: StrategySharedState;
   positionLedger: FundingArbManageProcessorLedger;
@@ -53,10 +61,14 @@ export async function processFundingArbManageTick(
   const now = (deps.now ?? Date.now)();
   const observedAt = new Date(now).toISOString();
 
-  // (1) Reconcile against Bybit (live only)
+  // (1) Reconcile against Bybit (live only). Uses the injected positionSource
+  // (WS-private cache + REST fallback) when provided; otherwise falls back to
+  // the REST client directly, preserving the original behaviour.
   if (!config.paperTrading) {
     try {
-      const live = await client.getPosition({ category: "linear", symbol: jobData.symbol });
+      const live = deps.positionSource
+        ? await deps.positionSource.getPosition(jobData.symbol, { category: "linear" })
+        : await client.getPosition({ category: "linear", symbol: jobData.symbol });
       const liveSize = live ? Number(live.size) : 0;
       if (jobData.qty > 0 && (!live || !Number.isFinite(liveSize) || liveSize < jobData.qty * 0.01)) {
         log({

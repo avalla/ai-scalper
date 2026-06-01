@@ -1,0 +1,33 @@
+[Unit]
+# Multi-day MAINNET-data PAPER run of the Phase 3 pipeline (scan→evaluate→agent).
+# Reads real Bybit mainnet tickers (read-only, no API key) but executes on paper.
+Description=AI Scalper - paper pipeline (mainnet data, paper execution)
+After=network-online.target redis.service
+Wants=network-online.target redis.service
+
+[Service]
+Type=simple
+User=assistant
+WorkingDirectory=/home/assistant/projects/ai-scalper/apps/worker
+# Real mainnet market data, paper execution, pipeline on, scanner scheduler off.
+Environment=BYBIT_BASE_URL=https://api.bybit.com
+Environment=BYBIT_PAPER_TRADING=true
+Environment=CONFIG_FILE=config.paper-pipeline.json
+Environment=AGGRESSIVE_CONFIG_FILE=config.aggressive.json
+Environment=SCAN_SCHEDULE_ENABLED=false
+Environment=LOG_LEVEL=info
+Environment=REDIS_URL=redis://127.0.0.1:6379
+# Phase 1 WS feed — required by the aggressive subsystem's liquidation map.
+# The worker spawns ws-feeder-cli as a child process when this is true.
+Environment=USE_WEBSOCKET=true
+Environment=WS_FEEDER_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+Environment=PATH=/home/assistant/.bun/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/assistant/.bun/bin/bun src/index.ts
+Restart=on-failure
+RestartSec=15
+# Mirror stdout/stderr to a file so it can be tailed without journal access.
+StandardOutput=append:/tmp/ai-scalper-paper.log
+StandardError=append:/tmp/ai-scalper-paper.log
+
+[Install]
+WantedBy=multi-user.target

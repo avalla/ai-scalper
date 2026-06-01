@@ -1,120 +1,21 @@
 {
-  "tradingProfile": "aggressive-perps",
-  "entry": {
-    "executionMode": "maker-entry",
-    "makerOffsetTicks": 1,
-    "makerPollMs": 200,
-    "makerTimeoutMs": 3000
-  },
-  "wallet": {
-    "autoSize": false,
-    "accountType": "UNIFIED",
-    "coin": "USDT",
-    "fraction": 1,
-    "maxOrderUsdCap": 15
-  },
-  "bybit": {
-    "category": "linear",
-    "symbol": "BTCUSDT",
-    "pollMs": 500,
-    "orderUsd": 10,
-    "leverage": 10,
-    "slippageTolerancePercent": 0.15,
-    "positionMode": "one-way",
-    "feeRoundTripBps": 5
-  },
-  "strategy": {
-    "fastWindow": 3,
-    "slowWindow": 10,
-    "thresholdBps": 2,
-    "stopLossBps": 20,
-    "takeProfitBps": 80,
-    "requireLocalMaConfirmation": true
-  },
-  "risk": {
-    "maxPositionUsd": 1000,
-    "maxDailyLossUsd": 100,
-    "maxSpreadBps": 5,
-    "minTradeIntervalMs": 3000,
-    "maxFundingRateBps": 12
-  },
-  "scanner": {
-    "refreshMs": 15000,
-    "minSetupScore": 55,
-    "minSetupNetEdgeBps": 20,
-    "candidateSymbols": [],
-    "excludedSymbols": ["BEATUSDT", "GENIUSUSDT", "BILLUSDT", "HYPEUSDT", "FARTCOINUSDT", "BSBUSDT"],
-    "minOpenInterestUsd": 20000000,
-    "minListingAgeDays": 30
-  },
-  "tickerFailure": {
-    "threshold": 2,
-    "cooldownTicks": 10
-  },
-  "aggressive": {
-    "allowedSymbols": [],
-    "requireScanCandidate": true,
-    "scanCandidatesPath": "apps/trader/data/scan-latest.json",
-    "scanLatestPath": "apps/trader/data/scan-latest.json",
-    "scanMaxAgeMinutes": 15,
-    "maxLeverage": 25,
-    "maxFundingRateBps": 12,
-    "maxLossPerTradeUsd": 20,
-    "minEstimatedLiqBufferBps": 50
-  },
-  "exceptional": {
-    "enabled": true,
-    "allowedSymbols": [],
-    "leverage": 50,
-    "maxSpreadBps": 1.0,
-    "maxFundingRateBps": 3,
-    "minHourlyMoveBps": 150,
-    "minMinuteRangeBps": 30,
-    "minNetEdgeBps": 25
-  },
-  "exitPolicy": {
-    "mode": "logical",
-    "safetyDelayMs": 5000,
-    "safetyStopBps": 60
-  },
-  "meta": {
-    "enabled": true,
-    "warmupMinTrades": 3,
-    "pnlWindowSize": 50,
-    "includeAggressiveVariants": true,
-    "halfLifeDays": 1
-  },
-  "runtime": {
-    "artifactFlushTicks": 30,
-    "statePersistenceEnabled": false,
-    "useWebSocket": false
-  },
-  "trailingStop": {
-    "enabled": true,
-    "activationBps": 30,
-    "trailBps": 15
-  },
-  "reconcile": {
-    "intervalTicks": 20,
-    "setTradingStopRetryMax": 3,
-    "setTradingStopRetryDelayMs": 500
-  },
-  "drawdown": {
-    "velocityWindowMs": 3600000,
-    "velocityMaxUsd": 50,
-    "maxConsecutiveLosses": 6
-  },
-  "confidenceSizing": {
-    "enabled": true,
-    "minMultiplier": 0.5,
-    "maxMultiplier": 2.0
-  },
-  "alerts": {
-    "webhookUrl": ""
-  },
-  "scanGateAutoTune": {
-    "enabled": true,
-    "percentile": 50,
-    "fallbackBps": 5
-  }
+  "_comment": "EXAMPLE aggressive subsystem config. Copy to config.aggressive.json and set enabled:true to activate. DANGEROUS by design.",
+  "enabled": true,
+  "symbol": "BTCUSDT",
+  "startingEquityUsd": 100,
+  "maxCapitalUsd": 200,
+  "dailyLossCapFraction": 0.5,
+  "maxTradesPerDay": 10,
+  "evaluateTickMs": 5000,
+  "manageTickMs": 2000,
+  "liquidationLookbackMs": 1800000,
+  "mapBandBps": 20,
+  "mapMinMagnetSizeUsd": 50000,
+  "maxHoldSec": 3600,
+  "tierLadder": [
+    { "minEquity": 0,     "maxEquity": 200,           "leverage": 25, "maxNotionalPerTrade": 50,   "strategy": "liquidation-hunter", "hardStopFraction": 0.02, "takeProfitFraction": 0.04 },
+    { "minEquity": 200,   "maxEquity": 1000,          "leverage": 10, "maxNotionalPerTrade": 200,  "strategy": "liquidation-hunter", "hardStopFraction": 0.03, "takeProfitFraction": 0.06 },
+    { "minEquity": 1000,  "maxEquity": 10000,         "leverage": 5,  "maxNotionalPerTrade": 1000, "strategy": "liquidation-hunter", "hardStopFraction": 0.04, "takeProfitFraction": 0.08 },
+    { "minEquity": 10000, "maxEquity": 100000000000,  "leverage": 2,  "maxNotionalPerTrade": 5000, "strategy": "liquidation-hunter", "hardStopFraction": 0.05, "takeProfitFraction": 0.10 }
+  ]
 }

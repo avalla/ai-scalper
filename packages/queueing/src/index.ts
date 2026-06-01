@@ -32,6 +32,11 @@ export const QUEUE_NAMES = {
   maCrossoverTradeManagement: "ma-crossover-trade-management",
   liquidationCascadeOpenDecision: "liquidation-cascade-open-decision",
   liquidationCascadeTradeManagement: "liquidation-cascade-trade-management",
+  // ── Phase 3 — scan → evaluate → agent pipeline. ────────────────────────
+  // One shared evaluate queue (fan-out per strategy via job name) and one
+  // shared trading-agent queue (single intent-driven executor).
+  strategyEvaluate: "strategy-evaluate",
+  tradingAgent: "trading-agent",
 } as const;
 
 export const JOB_NAMES = {
@@ -59,6 +64,11 @@ export const JOB_NAMES = {
   maCrossoverManageTick: "ma-crossover-manage-tick",
   liquidationCascadeOpenTick: "liquidation-cascade-open-tick",
   liquidationCascadeManageTick: "liquidation-cascade-manage-tick",
+  // ── Phase 3 — pipeline job names. ──────────────────────────────────────
+  // The evaluate job name is suffixed with the strategy at enqueue time
+  // (e.g. "strategy-evaluate.funding-arb") so Bull Board groups per strategy.
+  strategyEvaluateTick: "strategy-evaluate.tick",
+  tradingAgentExecute: "trading-agent.execute",
 } as const;
 
 export interface MarketScanJobData {
@@ -398,4 +408,70 @@ export interface LiquidationCascadeManageJobData {
   maxHoldSec: number;
   decisionsHistory: StrategyDecisionRow[];
   lastReviewAt: string;
+}
+
+// ── Phase 3 — scan → evaluate → trading-agent pipeline contract. ─────────
+//
+// The pipeline splits the legacy "open-processor" (decide + place order +
+// enqueue manage) into two stages:
+//
+//   [2] strategy-evaluate  — STATELESS. Reads scan-latest + config + a live
+//       market snapshot, returns zero or more TradingIntent. Places NO orders
+//       and touches NO queues. One job name per strategy (fan-out).
+//
+//   [3] trading-agent      — single intent-driven executor. Per-strategy
+//       ExecutionAdapter places the order(s) and enqueues the manage job. The
+//       agent is one worker; customization lives in the adapter selected by
+//       `intent.strategy`.
+
+/** One order leg of an intent. Single-leg strategies emit one; arb/pairs two. */
+export interface TradingIntentLeg {
+  symbol: string;
+  side: "long" | "short";
+  category: "linear" | "spot" | "inverse";
+  /** Floored-to-step quantity (base units). */
+  qty: number;
+  /** Same qty as the exchange-formatted string. */
+  qtyStr: string;
+  /** Reference price observed at evaluation time. */
+  refPrice: number;
+}
+
+/**
+ * The contract between stage 2 (evaluate) and stage 3 (agent). Carries the
+ * common execution surface plus an opaque `managePayload` the strategy's
+ * adapter uses to build its strategy-specific manage-job data.
+ */
+export interface TradingIntent {
+  /** Dispatch key — selects the trading-agent ExecutionAdapter. */
+  strategy: string;
+  /** Primary / underlying symbol (single-leg or arb underlying). */
+  symbol: string;
+  legs: TradingIntentLeg[];
+  notionalUsd: number;
+  leverage: number;
+  reason: string;
+  /** ISO timestamp the evaluator produced this intent. */
+  evaluatedAt: string;
+  /**
+   * Strategy-specific data the agent's adapter consumes to construct the
+   * manage-job payload (e.g. fundingTimeTarget, entryBasisBps, SL/TP prices).
+   * Kept opaque so the contract stays strategy-agnostic.
+   */
+  managePayload: Record<string, unknown>;
+}
+
+/** Recurring evaluate tick — stage 2. Audit/dedup vehicle only. */
+export interface StrategyEvaluateJobData {
+  /** Which strategy this tick evaluates (also the job-name suffix). */
+  strategy: string;
+  triggeredAt: string;
+  configFile: string;
+}
+
+/** Stage 3 — one job per emitted intent. */
+export interface TradingAgentJobData {
+  intent: TradingIntent;
+  /** ISO timestamp the evaluator enqueued this intent. */
+  enqueuedAt: string;
 }

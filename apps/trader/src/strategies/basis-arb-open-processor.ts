@@ -153,18 +153,37 @@ export async function processBasisArbOpenTick(
         ts: observedAt, event: "basis-arb-spot-open-failed-compensating",
         symbol, error: err instanceof Error ? err.message : String(err),
       });
-      try {
-        await client.createOrder({
-          category: "linear", symbol,
-          side: decision.perpSide === "long" ? "Sell" : "Buy",
-          qty: qtyOut.qtyStr, orderType: "Market", reduceOnly: true,
-        });
-      } catch (compErr) {
+      let compErr: unknown = null;
+      const maxCompAttempts = 3;
+      for (let attempt = 0; attempt < maxCompAttempts; attempt += 1) {
+        try {
+          await client.createOrder({
+            category: "linear", symbol,
+            side: decision.perpSide === "long" ? "Sell" : "Buy",
+            qty: qtyOut.qtyStr, orderType: "Market", reduceOnly: true,
+          });
+          compErr = null;
+          break;
+        } catch (e) {
+          compErr = e;
+          log({
+            ts: observedAt, event: "basis-arb-compensation-attempt-failed",
+            symbol, attempt: attempt + 1,
+            error: e instanceof Error ? e.message : String(e),
+          });
+          if (attempt < maxCompAttempts - 1) {
+            const delayMs = 500 * 2 ** attempt;
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+        }
+      }
+      if (compErr) {
         log({
-          ts: observedAt, event: "basis-arb-compensation-failed",
-          symbol, error: compErr instanceof Error ? compErr.message : String(compErr),
+          ts: observedAt, event: "basis-arb-compensation-exhausted",
+          symbol, attempts: maxCompAttempts,
+          error: compErr instanceof Error ? compErr.message : String(compErr),
         });
-        await alerter.send(`basis-arb COMPENSATION FAILED, manual close needed: ${symbol}`).catch(() => {});
+        await alerter.send(`[CRITICAL] basis-arb COMPENSATION EXHAUSTED after ${maxCompAttempts} attempts, manual close needed: ${symbol}`).catch(() => {});
       }
       await alerter.send(`basis-arb spot open failed (compensated): ${symbol}`).catch(() => {});
       return { status: "compensated", reason: "spot-open-failed" };

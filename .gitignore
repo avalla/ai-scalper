@@ -8,3 +8,7 @@ coverage
 *.swp
 .*.swp
 apps/trader/data/
+# Operator-tuned local config — example template is tracked instead.
+apps/trader/config.paper-pipeline.json
+# Local tool state (claude-flow telemetry).
+**/.claude-flow/

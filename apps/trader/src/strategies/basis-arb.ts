@@ -51,10 +51,18 @@ export type BasisArbDecision =
     }
   | {
       kind: "exit";
-      reason: "basis-converged" | "max-hold-exceeded";
+      reason: "basis-converged" | "max-hold-exceeded" | "divergence-stop";
       currentBasisBps: number;
     }
   | { kind: "hold"; reason: string; basisBps: number };
+
+/**
+ * Maximum plausible perp/spot basis (bps). The real basis on a liquid symbol
+ * is single-digit bps; anything beyond this ceiling is a data error (e.g. a
+ * stale/bad tick on one leg), not a tradeable signal, and must NOT open a
+ * position. 500bps (5%) is already wildly generous.
+ */
+export const MAX_PLAUSIBLE_BASIS_BPS = 500;
 
 /** Compute the basis (perp - spot) / spot in basis points. Returns 0 if spot<=0. */
 export function computeBasisBps(spotPrice: number, perpPrice: number): number {
@@ -77,6 +85,10 @@ export function basisArbDecide(input: BasisArbInput): BasisArbDecision {
   }
 
   // No position — consider opening.
+  // Data-integrity guard: reject physically-impossible basis as a bad tick.
+  if (Math.abs(basisBps) > MAX_PLAUSIBLE_BASIS_BPS) {
+    return { kind: "hold", reason: "implausible-basis", basisBps };
+  }
   if (Math.abs(basisBps) <= input.config.entryThresholdBps) {
     return { kind: "hold", reason: "basis-too-small", basisBps };
   }

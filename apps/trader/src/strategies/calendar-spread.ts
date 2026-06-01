@@ -67,7 +67,7 @@ export type CalendarDecision =
     }
   | {
       kind: "exit";
-      reason: "spread-converged" | "pre-settlement";
+      reason: "spread-converged" | "pre-settlement" | "divergence-stop";
       currentSpreadBps: number;
     }
   | { kind: "hold"; reason: string; spreadBps: number };

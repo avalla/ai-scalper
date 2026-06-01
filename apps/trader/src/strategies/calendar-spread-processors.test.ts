@@ -163,6 +163,28 @@ describe("processCalendarSpreadManageTick", () => {
     expect(entries[0]!.calendarDatedSymbol).toBe("BTC-26SEP25");
   });
 
+  test("divergence stop fires when spread widens beyond entry+stopBps (leveraged safety)", async () => {
+    // entry spread 60 bps; current perp 50000 / dated 50800 → spread ~+160 bps → widened by 100
+    const entries: ClosedPositionLedgerEntry[] = [];
+    const deps: CalendarSpreadManageProcessorDeps = {
+      config: makeConfig({ paperTrading: true, calendarSpreadDivergenceStopBps: 50 }),
+      client: {
+        async getPosition() { return { size: "0.001" }; },
+        async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "50800" }; },
+        async createOrder() {},
+      } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50800 }),
+      alerter: { async send() {} } as any,
+      sharedState: makeShared(),
+      positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },
+      log: () => {}, now: () => Date.now(),
+    };
+    const r = await processCalendarSpreadManageTick(makeJob({ entrySpreadBps: 60 }), deps);
+    expect(r.status).toBe("complete");
+    if (r.status === "complete") expect(r.reason).toBe("divergence-stop");
+    expect(entries).toHaveLength(1);
+  });
+
   test("external close detected when either leg vanishes", async () => {
     const entries: ClosedPositionLedgerEntry[] = [];
     const deps: CalendarSpreadManageProcessorDeps = {

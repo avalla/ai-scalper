@@ -12,6 +12,7 @@
     "scan": "bun run --filter @ai-scalper/worker enqueue:scan",
     "worker": "bun run --filter @ai-scalper/worker worker",
     "up": "bun run --filter @ai-scalper/worker up",
+    "up:multi": "bun run --filter @ai-scalper/worker up:multi",
     "board": "bun run --filter @ai-scalper/worker board",
     "all": "concurrently -k -n stack,board -c blue,green \"bun run up\" \"bun run board\"",
     "enqueue:scan": "bun run --filter @ai-scalper/worker enqueue:scan",
@@ -21,7 +22,7 @@
     "lint": "bunx tsc -b tsconfig.json --pretty false",
     "test": "bun test",
     "report": "bun run --filter @ai-scalper/trader report",
-    "backtest": "bun apps/trader/src/backtest/cli.ts"
+    "report:daily": "bun run --filter @ai-scalper/trader report:daily"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

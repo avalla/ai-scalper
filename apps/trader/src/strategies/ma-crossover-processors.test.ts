@@ -92,7 +92,7 @@ describe("processMaCrossoverOpenTick", () => {
         async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
         async setLeverage() {}, async createOrder() {},
       } as any,
-      tickerSource: makeTickerSource({ lastPrice: 100 }),
+      tickerSource: { async getTicker() { return { lastPrice: "100", markPrice: "100" } as any; }, peek() { return null; } } as any,
       alerter: { async send() {} } as any,
       manageQueue: { async add(n: string, d: any, o: any) { calls.push({ n, d, o }); return null; } },
       sharedState: makeShared(),
@@ -219,3 +219,121 @@ describe("processMaCrossoverManageTick", () => {
     expect(loaded!.stats["test-variant"]).toBeUndefined();
   });
 });
+
+describe("processMaCrossoverOpenTick — shadow learning", () => {
+  test("runs paper step() for every eligible variant when shadowStore provided", async () => {
+    const allocStore = makeAllocatorStore();
+    await allocStore.save(emptyAllocatorState());
+    const shadowSaves: any[] = [];
+    const shadowStore = {
+      async load() { return {}; },
+      async save(s: any) { shadowSaves.push(s); },
+    };
+    const variants = [
+      { id: "v-fast", params: { fastWindow: 2, slowWindow: 3, thresholdBps: 0, stopLossBps: 50, takeProfitBps: 100, leverage: 5, orderUsd: 100 } },
+      { id: "v-slow", params: { fastWindow: 3, slowWindow: 5, thresholdBps: 0, stopLossBps: 50, takeProfitBps: 100, leverage: 5, orderUsd: 100 } },
+    ];
+    // Seed price history with enough samples that BOTH variants are past warmup.
+    const priceStore = createInMemoryPriceHistoryStore();
+    [100, 100, 100, 100, 100].forEach((p) => priceStore.push("BTCUSDT", p, 50));
+
+    const deps: MaCrossoverOpenProcessorDeps = {
+      config: makeConfig({ paperTrading: true }),
+      client: {
+        async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
+      } as any,
+      tickerSource: { async getTicker() { return { lastPrice: "100", markPrice: "100" } as any; }, peek() { return null; } } as any,
+      alerter: { async send() {} } as any,
+      manageQueue: { async add() { return null; } },
+      sharedState: makeShared(),
+      allocatorStore: allocStore,
+      priceHistoryStore: priceStore,
+      variantPoolFn: () => variants as any,
+      shadowStore: shadowStore as any,
+      log: () => {}, now: () => 1_700_000_000_000,
+    };
+    await processMaCrossoverOpenTick({ triggeredAt: "x", configFile: "x" }, deps);
+    expect(shadowSaves.length).toBe(1);
+    expect(Object.keys(shadowSaves[0])).toEqual(expect.arrayContaining(["v-fast", "v-slow"]));
+  });
+
+  test("records non-champion variant close into allocator (the actual bug fix)", async () => {
+    const allocStore = makeAllocatorStore();
+    await allocStore.save(emptyAllocatorState());
+    // Pre-seed shadow state where v-fast holds an OPEN long position
+    // entered at 100. Today's tick price is 110 (above TP) → close at +PnL.
+    const seeded = {
+      "v-fast": {
+        lastTradeAt: 1_700_000_000_000 - 60_000,
+        realizedPnlUsd: 0,
+        position: { side: "long", entryPrice: 100, quantity: 1, notionalUsd: 100, openedAt: 1_700_000_000_000 - 60_000, leverage: 5, stopLossPrice: 99.5, takeProfitPrice: 100.5 },
+        dayStartedAt: 1_700_000_000_000 - 60_000,
+      },
+    };
+    const shadowStore = {
+      _state: seeded as any,
+      async load() { return this._state; },
+      async save(s: any) { this._state = s; },
+    };
+    const variants = [
+      { id: "v-fast", params: { fastWindow: 2, slowWindow: 3, thresholdBps: 0, stopLossBps: 50, takeProfitBps: 50, leverage: 5, orderUsd: 100 } },
+      { id: "v-slow", params: { fastWindow: 3, slowWindow: 5, thresholdBps: 0, stopLossBps: 50, takeProfitBps: 100, leverage: 5, orderUsd: 100 } },
+    ];
+    const priceStore = createInMemoryPriceHistoryStore();
+    [100, 100, 100, 100, 100].forEach((p) => priceStore.push("BTCUSDT", p, 50));
+
+    const deps: MaCrossoverOpenProcessorDeps = {
+      config: makeConfig({ paperTrading: true }),
+      client: {
+        async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
+      } as any,
+      tickerSource: { async getTicker() { return { lastPrice: "110", markPrice: "110" } as any; }, peek() { return null; } } as any, // > TP (100 * 1.005)
+      alerter: { async send() {} } as any,
+      manageQueue: { async add() { return null; } },
+      sharedState: makeShared(),
+      allocatorStore: allocStore,
+      priceHistoryStore: priceStore,
+      variantPoolFn: () => variants as any,
+      shadowStore: shadowStore as any,
+      log: () => {}, now: () => 1_700_000_000_000,
+    };
+    await processMaCrossoverOpenTick({ triggeredAt: "x", configFile: "x" }, deps);
+
+    // After the shadow pass: v-fast's open position TP'd → recordClosedTrade
+    // called → allocator.stats["v-fast"] must exist with one trade.
+    const after = await allocStore.load();
+    expect(after).not.toBeNull();
+    expect(after!.stats["v-fast"]).toBeDefined();
+    expect(after!.stats["v-fast"]!.closedTrades).toBe(1);
+    expect(after!.stats["v-fast"]!.recentPnlWindow.length).toBe(1);
+  });
+
+  test("no shadowStore → allocator unchanged (legacy behaviour preserved)", async () => {
+    const allocStore = makeAllocatorStore();
+    await allocStore.save(emptyAllocatorState());
+    const variants = [
+      { id: "v-fast", params: { fastWindow: 2, slowWindow: 3, thresholdBps: 0, stopLossBps: 50, takeProfitBps: 100, leverage: 5, orderUsd: 100 } },
+    ];
+    const priceStore = createInMemoryPriceHistoryStore();
+    [100, 100, 100, 100, 100].forEach((p) => priceStore.push("BTCUSDT", p, 50));
+    const deps: MaCrossoverOpenProcessorDeps = {
+      config: makeConfig({ paperTrading: true }),
+      client: {
+        async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
+      } as any,
+      tickerSource: { async getTicker() { return { lastPrice: "110", markPrice: "110" } as any; }, peek() { return null; } } as any,
+      alerter: { async send() {} } as any,
+      manageQueue: { async add() { return null; } },
+      sharedState: makeShared(),
+      allocatorStore: allocStore,
+      priceHistoryStore: priceStore,
+      variantPoolFn: () => variants as any,
+      // shadowStore intentionally omitted
+      log: () => {}, now: () => 1_700_000_000_000,
+    };
+    await processMaCrossoverOpenTick({ triggeredAt: "x", configFile: "x" }, deps);
+    const after = await allocStore.load();
+    expect(after!.stats["v-fast"]).toBeUndefined();
+  });
+});
+

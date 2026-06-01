@@ -12,7 +12,7 @@ import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { BasisArbManageJobData } from "@ai-scalper/queueing";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
-import { basisArbDecide, computeBasisBps } from "./basis-arb";
+import { basisArbDecide, computeBasisBps, type BasisArbDecision } from "./basis-arb";
 import type { StrategySharedState } from "./shared/bullmq-shared-state";
 import { appendDecisionHistory } from "./shared/trade-job-helpers";
 import type { ClosedPositionLedgerEntry } from "../trading/position-ledger";
@@ -90,20 +90,35 @@ export async function processBasisArbManageTick(
     return { status: "continue", updatedData: { ...jobData, lastReviewAt: observedAt } };
   }
 
-  // (3) decide
-  const decision = decideFn({
-    spotPrice, perpPrice, now,
-    position: {
-      perpSide: jobData.perpSide, spotSide: jobData.spotSide,
-      entryBasisBps: jobData.entryBasisBps,
-      entryAt: new Date(jobData.openedAt).getTime(),
-    },
-    config: {
-      entryThresholdBps: config.basisArbEntryThresholdBps,
-      exitThresholdBps: config.basisArbExitThresholdBps,
-      maxHoldMinutes: config.basisArbMaxHoldMinutes,
-    },
-  });
+  // (3a) divergence-stop guard — leveraged-trading safety net.
+  const currentBasisBps = computeBasisBps(spotPrice, perpPrice);
+  const widenedBps = Math.abs(currentBasisBps) - Math.abs(jobData.entryBasisBps);
+  const divergenceStopBps = config.basisArbSpreadDivergenceStopBps;
+  let decision: BasisArbDecision;
+  if (divergenceStopBps > 0 && widenedBps > divergenceStopBps) {
+    log({
+      ts: observedAt, event: "basis-arb-divergence-stop",
+      positionId: jobData.positionId,
+      entryBasisBps: jobData.entryBasisBps, currentBasisBps,
+      widenedBps, divergenceStopBps,
+    });
+    decision = { kind: "exit", reason: "divergence-stop", currentBasisBps };
+  } else {
+    // (3b) normal decide
+    decision = decideFn({
+      spotPrice, perpPrice, now,
+      position: {
+        perpSide: jobData.perpSide, spotSide: jobData.spotSide,
+        entryBasisBps: jobData.entryBasisBps,
+        entryAt: new Date(jobData.openedAt).getTime(),
+      },
+      config: {
+        entryThresholdBps: config.basisArbEntryThresholdBps,
+        exitThresholdBps: config.basisArbExitThresholdBps,
+        maxHoldMinutes: config.basisArbMaxHoldMinutes,
+      },
+    });
+  }
 
   if (decision.kind === "hold") {
     return {
@@ -135,16 +150,34 @@ export async function processBasisArbManageTick(
         });
       },
     ];
+    const maxLegAttempts = 3;
     for (let i = 0; i < closes.length; i += 1) {
-      try { await closes[i]!(); }
-      catch (err) {
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < maxLegAttempts; attempt += 1) {
+        try { await closes[i]!(); lastErr = null; break; }
+        catch (err) {
+          lastErr = err;
+          log({
+            ts: observedAt, event: "basis-arb-close-leg-attempt-failed",
+            leg: i === 0 ? "perp" : "spot", symbol: jobData.symbol,
+            attempt: attempt + 1,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          if (attempt < maxLegAttempts - 1) {
+            const delayMs = 500 * 2 ** attempt;
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+        }
+      }
+      if (lastErr) {
         log({
           ts: observedAt, event: "basis-arb-close-leg-failed",
           leg: i === 0 ? "perp" : "spot", symbol: jobData.symbol,
-          error: err instanceof Error ? err.message : String(err),
+          attempts: maxLegAttempts,
+          error: lastErr instanceof Error ? lastErr.message : String(lastErr),
         });
-        await alerter.send(`basis-arb close leg ${i + 1} failed: ${jobData.symbol}`).catch(() => {});
-        // Keep job alive — next tick retries safety.
+        await alerter.send(`basis-arb close leg ${i + 1} failed after ${maxLegAttempts}x: ${jobData.symbol}`).catch(() => {});
+        // Keep job alive — next tick retries safety (with its own backoff).
         return {
           status: "continue",
           updatedData: {

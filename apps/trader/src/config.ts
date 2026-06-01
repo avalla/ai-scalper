@@ -29,6 +29,30 @@ function resolveConfigFile(name: string): string | null {
   return null;
 }
 
+/** Maximum leverage allowed by the leveraged-trading guards. Hard-coded ceiling. */
+export const MAX_LEVERAGE_ALLOWED = 10;
+
+/**
+ * Clamp a configured leverage to [1, MAX_LEVERAGE_ALLOWED]. Logs a warning
+ * if the input was outside the range — operator typo defence. Treats absent /
+ * non-finite values as 1 (legacy unleveraged behaviour).
+ */
+export function clampLeverage(value: number | undefined, sourcePath: string): number {
+  if (value === undefined || value === null || !Number.isFinite(value) || value <= 0) return 1;
+  if (value > MAX_LEVERAGE_ALLOWED) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      event: "leverage-clamped",
+      sourcePath,
+      requested: value,
+      applied: MAX_LEVERAGE_ALLOWED,
+      reason: `leverage > ${MAX_LEVERAGE_ALLOWED} is rejected by safety policy`,
+    }));
+    return MAX_LEVERAGE_ALLOWED;
+  }
+  return value;
+}
+
 function loadConfig(): TradingConfig {
   const configFile = process.env.CONFIG_FILE;
   if (!configFile) return defaultConfig;
@@ -161,6 +185,22 @@ export interface TraderConfig {
    * Sourced from JSON path `runtime.useWebSocket`.
    */
   useWebSocket: boolean;
+  /**
+   * Phase 3 pipeline. When true, the worker starts the scan → evaluate →
+   * trading-agent pipeline for the piloted strategies instead of their
+   * legacy open-processors. Manage workers are unchanged. Sourced from JSON
+   * path `runtime.usePipeline`, default false.
+   */
+  usePipeline: boolean;
+  /**
+   * Execution mode for pipeline adapters' ENTRY orders. "taker" places Market
+   * orders (current default, fastest fill, taker fees on both legs). "maker-
+   * with-timeout" places post-only Limit at best bid/ask, waits, then falls
+   * back to Market on timeout — substantially cuts entry fees on real fills.
+   * Affects live execution only; paper mode bypasses order placement. Source:
+   * `runtime.pipelineExecutionMode`, default "taker".
+   */
+  pipelineExecutionMode: "taker" | "maker-with-timeout";
   // LLM-managed strategy
   llmManagedAllowedSymbols: string[];
   llmManagedOpenReviewIntervalSec: number;
@@ -182,6 +222,14 @@ export interface TraderConfig {
   calendarPreSettlementCloseHours: number;
   calendarMaxNotionalUsdPerLeg: number;
   calendarPollSec: number;
+  /** Cross-margin leverage applied to both legs. Clamped to [1, 10]. */
+  calendarLeverage: number;
+  /**
+   * Adverse-divergence stop. If |currentBasis| - |entryBasis| > this (bps),
+   * the manage processor closes immediately as 'divergence-stop'. 0 = disabled.
+   * MUST be set when calendarLeverage > 1 (otherwise leveraged blow-up risk).
+   */
+  calendarSpreadDivergenceStopBps: number;
   // LLM advisor
   advisorEnabled: boolean;
   advisorIntervalMinutes: number;
@@ -218,6 +266,10 @@ export interface TraderConfig {
   basisArbExitThresholdBps: number;
   basisArbMaxNotionalUsd: number;
   basisArbMaxHoldMinutes: number;
+  /** Cross-margin leverage on the perp leg. Clamped to [1, 10]. */
+  basisArbLeverage: number;
+  /** Adverse-divergence stop (bps). 0 = disabled. Required when leverage > 1. */
+  basisArbSpreadDivergenceStopBps: number;
   // Funding-arb
   fundingArbMinAbsRateBps: number;
   fundingArbEntryWindowMinutesBefore: number;
@@ -397,6 +449,8 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     strategyType,
     useBullmqJobs: (runtime.useBullmqJobs as boolean | undefined) ?? false,
     useWebSocket: (runtime.useWebSocket as boolean | undefined) ?? false,
+    usePipeline: (runtime.usePipeline as boolean | undefined) ?? false,
+    pipelineExecutionMode: (runtime.pipelineExecutionMode as TraderConfig["pipelineExecutionMode"] | undefined) ?? "taker",
     llmManagedAllowedSymbols: (llmManaged.allowedSymbols as string[]) ?? ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     llmManagedOpenReviewIntervalSec: (llmManaged.openReviewIntervalSec as number) ?? 600,
     llmManagedManageReviewIntervalSec: (llmManaged.manageReviewIntervalSec as number) ?? 180,
@@ -416,6 +470,8 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     calendarPreSettlementCloseHours: (calendarSpread.preSettlementCloseHours as number) ?? 24,
     calendarMaxNotionalUsdPerLeg: (calendarSpread.maxNotionalUsdPerLeg as number) ?? 200,
     calendarPollSec: (calendarSpread.pollSec as number) ?? 60,
+    calendarLeverage: clampLeverage(calendarSpread.leverage as number | undefined, "calendarSpread.leverage"),
+    calendarSpreadDivergenceStopBps: (calendarSpread.spreadDivergenceStopBps as number) ?? 0,
     advisorEnabled: (advisor.enabled as boolean) ?? false,
     advisorIntervalMinutes: (advisor.intervalMinutes as number) ?? 30,
     advisorModel: (advisor.model as string) ?? "claude-haiku-4-5-20251001",
@@ -431,6 +487,8 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     basisArbExitThresholdBps: (basisArb.exitThresholdBps as number) ?? 2,
     basisArbMaxNotionalUsd: (basisArb.maxNotionalUsd as number) ?? 100,
     basisArbMaxHoldMinutes: (basisArb.maxHoldMinutes as number) ?? 240,
+    basisArbLeverage: clampLeverage(basisArb.leverage as number | undefined, "basisArb.leverage"),
+    basisArbSpreadDivergenceStopBps: (basisArb.spreadDivergenceStopBps as number) ?? 0,
     fundingArbMinAbsRateBps: (fundingArb.minAbsRateBps as number) ?? 5,
     fundingArbEntryWindowMinutesBefore: (fundingArb.entryWindowMinutesBefore as number) ?? 5,
     fundingArbExitDelayMinutesAfter: (fundingArb.exitDelayMinutesAfter as number) ?? 2,

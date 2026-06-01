@@ -114,9 +114,12 @@ export function createWsFeeder(opts: WsFeederOptions): WsFeederHandle {
   client.onPublicTrade((trade) => {
     // Filter: only liquidation prints (Bybit V5 `BT=true`).
     if (!trade.isLiquidation) return;
-    const sizeUsd = Number(trade.price) * Number(trade.size);
+    const price = Number(trade.price);
+    const sizeUsd = price * Number(trade.size);
     if (!Number.isFinite(sizeUsd) || sizeUsd <= 0) return;
-    const entry = { ts: trade.ts, side: trade.side, sizeUsd };
+    // `price` is persisted only when valid — older entries without it remain
+    // backward-compatible for the conservative liquidation-cascade reader.
+    const entry = { ts: trade.ts, side: trade.side, sizeUsd, ...(Number.isFinite(price) && price > 0 ? { price } : {}) };
     void liquidationsCache.push(trade.symbol, entry).catch((err) => {
       log({ event: "ws-feeder-publish-failed", feed: "liquidation", symbol: trade.symbol, err: String(err) });
     });

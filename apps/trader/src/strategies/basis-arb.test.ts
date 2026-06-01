@@ -30,6 +30,19 @@ describe("computeBasisBps", () => {
 });
 
 describe("basisArbDecide", () => {
+  test("hold:implausible-basis rejects a physically-impossible basis (bad tick)", () => {
+    // perp 99067, spot 74310 → ~3331 bps: the corrupt tick from the paper run
+    const decision = basisArbDecide({
+      spotPrice: 74310,
+      perpPrice: 99067.9,
+      now: NOW,
+      position: null,
+      config: baseCfg,
+    });
+    expect(decision.kind).toBe("hold");
+    if (decision.kind === "hold") expect(decision.reason).toBe("implausible-basis");
+  });
+
   test("hold:basis-too-small when no position and basis below threshold", () => {
     const decision = basisArbDecide({
       spotPrice: 100,

@@ -1,0 +1,21 @@
+{
+  "_comment": "EXAMPLE aggressive subsystem config. Copy to config.aggressive.json and set enabled:true to activate. DANGEROUS by design.",
+  "enabled": false,
+  "symbol": "BTCUSDT",
+  "startingEquityUsd": 100,
+  "maxCapitalUsd": 200,
+  "dailyLossCapFraction": 0.5,
+  "maxTradesPerDay": 10,
+  "evaluateTickMs": 5000,
+  "manageTickMs": 2000,
+  "liquidationLookbackMs": 1800000,
+  "mapBandBps": 20,
+  "mapMinMagnetSizeUsd": 50000,
+  "maxHoldSec": 3600,
+  "tierLadder": [
+    { "minEquity": 0,     "maxEquity": 200,           "leverage": 25, "maxNotionalPerTrade": 50,   "strategy": "liquidation-hunter", "hardStopFraction": 0.02, "takeProfitFraction": 0.04 },
+    { "minEquity": 200,   "maxEquity": 1000,          "leverage": 10, "maxNotionalPerTrade": 200,  "strategy": "liquidation-hunter", "hardStopFraction": 0.03, "takeProfitFraction": 0.06 },
+    { "minEquity": 1000,  "maxEquity": 10000,         "leverage": 5,  "maxNotionalPerTrade": 1000, "strategy": "liquidation-hunter", "hardStopFraction": 0.04, "takeProfitFraction": 0.08 },
+    { "minEquity": 10000, "maxEquity": 100000000000,  "leverage": 2,  "maxNotionalPerTrade": 5000, "strategy": "liquidation-hunter", "hardStopFraction": 0.05, "takeProfitFraction": 0.10 }
+  ]
+}

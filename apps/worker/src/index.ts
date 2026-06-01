@@ -21,6 +21,9 @@ import { startPairsTradingWorkerStack, type PairsTradingWorkerStack } from "./pa
 import { startCalendarSpreadWorkerStack, type CalendarSpreadWorkerStack } from "./calendar-spread-workers";
 import { startMaCrossoverWorkerStack, type MaCrossoverWorkerStack } from "./ma-crossover-workers";
 import { startLiquidationCascadeWorkerStack, type LiquidationCascadeWorkerStack } from "./liquidation-cascade-workers";
+import { startPipelineWorkerStack, type PipelineWorkerStack } from "./pipeline-workers";
+import { startAggressiveWorkerStack, type AggressiveWorkerStack } from "./aggressive-workers";
+import { loadAggressiveConfig } from "../../trader/src/aggressive/config";
 
 const scanJobTimeoutMs = Number(process.env.SCAN_JOB_TIMEOUT_MS || "30000");
 const scanScheduleEnabled = process.env.SCAN_SCHEDULE_ENABLED !== "false";
@@ -332,8 +335,30 @@ let pairsTradingStack: PairsTradingWorkerStack | null = null;
 let calendarSpreadStack: CalendarSpreadWorkerStack | null = null;
 let maCrossoverStack: MaCrossoverWorkerStack | null = null;
 let liquidationCascadeStack: LiquidationCascadeWorkerStack | null = null;
+let pipelineStack: PipelineWorkerStack | null = null;
+let aggressiveStack: AggressiveWorkerStack | null = null;
+/** Optional ws-feeder subprocess (spawned by main() when USE_WEBSOCKET=true). */
+let wsFeederProcess: ReturnType<typeof Bun.spawn> | null = null;
 
 async function main(): Promise<void> {
+  // ── Optional ws-feeder subprocess (Phase 1 WS feed). ────────────────────
+  // When USE_WEBSOCKET=true the feeder writes ticker + liquidation events
+  // into Redis. The aggressive subsystem REQUIRES this for the liquidation
+  // map; the conservative pipeline also benefits (cached ticker source).
+  if (process.env.USE_WEBSOCKET === "true") {
+    wsFeederProcess = Bun.spawn({
+      cmd: ["bun", "src/ws-feeder-cli.ts"],
+      env: process.env,
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      event: "ws-feeder-spawned",
+      pid: wsFeederProcess.pid,
+    }));
+  }
+
   await queue.waitUntilReady();
   await paperSessionQueue.waitUntilReady();
   await liveSessionQueue.waitUntilReady();
@@ -386,7 +411,10 @@ async function main(): Promise<void> {
       ow.on("failed", logFailure(params.openQ) as unknown as (...args: unknown[]) => void);
       mw.on("failed", logFailure(params.manageQ) as unknown as (...args: unknown[]) => void);
     };
-    const useBullmq = cfg.useBullmqJobs;
+    // When the Phase 3 pipeline owns trading, the legacy per-strategy open
+    // stacks must not also run (would double-open). The pipeline starts its
+    // own manage workers for the piloted strategies.
+    const useBullmq = cfg.useBullmqJobs && !cfg.usePipeline;
     await startStack({
       strategy: "funding-arb", flag: useBullmq,
       openQ: QUEUE_NAMES.fundingArbOpenDecision, manageQ: QUEUE_NAMES.fundingArbTradeManagement,
@@ -439,6 +467,43 @@ async function main(): Promise<void> {
     console.warn(JSON.stringify({
       level: "warn",
       event: "phase2-bullmq-bootstrap-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+
+  // ── Phase 3: scan → evaluate → trading-agent pipeline (gated) ────────
+  try {
+    const cfg = readTraderConfig();
+    if (cfg.usePipeline) {
+      pipelineStack = await startPipelineWorkerStack({ connection, config: cfg });
+      activeQueues.push(QUEUE_NAMES.strategyEvaluate, QUEUE_NAMES.tradingAgent);
+      pipelineStack.evaluateWorker.on("failed", logFailure(QUEUE_NAMES.strategyEvaluate));
+      pipelineStack.agentWorker.on("failed", logFailure(QUEUE_NAMES.tradingAgent));
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      event: "phase3-pipeline-bootstrap-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+
+  // ── Aggressive trader subsystem (separate, gated by its own config file) ──
+  try {
+    const aggressiveCfg = loadAggressiveConfig();
+    if (aggressiveCfg && aggressiveCfg.enabled) {
+      const cfg = readTraderConfig();
+      aggressiveStack = await startAggressiveWorkerStack({
+        connection, traderConfig: cfg, aggressiveConfig: aggressiveCfg,
+      });
+      activeQueues.push("aggressive-evaluate", "aggressive-manage");
+      aggressiveStack.evalWorker.on("failed", logFailure("aggressive-evaluate"));
+      aggressiveStack.manageWorker.on("failed", logFailure("aggressive-manage"));
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      event: "aggressive-bootstrap-failed",
       error: err instanceof Error ? err.message : String(err),
     }));
   }
@@ -523,6 +588,18 @@ async function shutdown(signal: string): Promise<void> {
     if (liquidationCascadeStack) {
       await liquidationCascadeStack.shutdown();
       console.log(JSON.stringify({ event: "shutdown-progress", step: "liquidation-cascade-stack-closed" }));
+    }
+    if (pipelineStack) {
+      await pipelineStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "pipeline-stack-closed" }));
+    }
+    if (aggressiveStack) {
+      await aggressiveStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "aggressive-stack-closed" }));
+    }
+    if (wsFeederProcess && !wsFeederProcess.killed) {
+      try { wsFeederProcess.kill("SIGTERM"); } catch { /* ignore */ }
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "ws-feeder-killed" }));
     }
     await connection.quit();
     console.log(JSON.stringify({ event: "shutdown-complete" }));

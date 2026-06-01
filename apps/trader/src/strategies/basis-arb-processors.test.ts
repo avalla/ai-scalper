@@ -110,6 +110,65 @@ describe("processBasisArbOpenTick", () => {
     expect(calls).toHaveLength(0); // no manage job enqueued
   });
 
+  test("retries compensation up to 3x and succeeds on attempt 2", async () => {
+    let perpOpenOrders = 0;
+    let compAttempts = 0;
+    const deps: BasisArbOpenProcessorDeps = {
+      config: makeConfig({ paperTrading: false }),
+      client: {
+        async getTicker(p: any) { return { lastPrice: p.category === "linear" ? "50100" : "50000", fundingRate: "0" }; },
+        async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
+        async createOrder(args: any) {
+          if (args.category === "linear" && !args.reduceOnly) { perpOpenOrders += 1; return; }
+          if (args.category === "linear" && args.reduceOnly) {
+            compAttempts += 1;
+            if (compAttempts < 2) throw new Error("transient venue glitch");
+            return;
+          }
+          if (args.category === "spot") throw new Error("spot venue down");
+        },
+      } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50100, spotPrice: 50000 }),
+      alerter: { async send() {} } as any,
+      manageQueue: { async add() { return null; } },
+      sharedState: makeShared(),
+      log: () => {}, now: () => 1_700_000_000_000,
+    };
+    const r = await processBasisArbOpenTick({ triggeredAt: "x", configFile: "x" }, deps);
+    expect(r.status).toBe("compensated");
+    expect(perpOpenOrders).toBe(1);
+    expect(compAttempts).toBe(2);
+  });
+
+  test("alerts CRITICAL when compensation exhausted after 3 attempts", async () => {
+    let compAttempts = 0;
+    const alerts: string[] = [];
+    const deps: BasisArbOpenProcessorDeps = {
+      config: makeConfig({ paperTrading: false }),
+      client: {
+        async getTicker(p: any) { return { lastPrice: p.category === "linear" ? "50100" : "50000", fundingRate: "0" }; },
+        async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
+        async createOrder(args: any) {
+          if (args.category === "linear" && !args.reduceOnly) return;
+          if (args.category === "linear" && args.reduceOnly) {
+            compAttempts += 1;
+            throw new Error("venue down hard");
+          }
+          if (args.category === "spot") throw new Error("spot venue down");
+        },
+      } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50100, spotPrice: 50000 }),
+      alerter: { async send(msg: string) { alerts.push(msg); } } as any,
+      manageQueue: { async add() { return null; } },
+      sharedState: makeShared(),
+      log: () => {}, now: () => 1_700_000_000_000,
+    };
+    const r = await processBasisArbOpenTick({ triggeredAt: "x", configFile: "x" }, deps);
+    expect(r.status).toBe("compensated");
+    expect(compAttempts).toBe(3);
+    expect(alerts.some((m) => m.includes("CRITICAL") && m.includes("EXHAUSTED"))).toBe(true);
+  });
+
   test("skips when basis below entry threshold", async () => {
     const deps: BasisArbOpenProcessorDeps = {
       config: makeConfig({ paperTrading: true, basisArbEntryThresholdBps: 100 }),
@@ -192,6 +251,47 @@ describe("processBasisArbManageTick", () => {
       log: () => {}, now: () => 1_700_000_060_000,
     };
     const r = await processBasisArbManageTick(makeJob(), deps);
+    expect(r.status).toBe("continue");
+  });
+
+  test("divergence stop fires when basis widens beyond entry+stopBps (leveraged safety)", async () => {
+    const entries: ClosedPositionLedgerEntry[] = [];
+    // entry basis was 20 bps; current perp 50500 / spot 50000 → basis ≈ +100 bps → widened by 80
+    const deps: BasisArbManageProcessorDeps = {
+      config: makeConfig({ paperTrading: true, basisArbSpreadDivergenceStopBps: 30 }),
+      client: {
+        async getPosition() { return { size: "0.01" }; },
+        async getTicker(p: any) { return { lastPrice: p.category === "linear" ? "50500" : "50000", fundingRate: "0" }; },
+        async createOrder() {},
+      } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50500, spotPrice: 50000 }),
+      alerter: { async send() {} } as any,
+      sharedState: makeShared(),
+      positionLedger: { async appendClosedPosition(e: any) { entries.push(e); } },
+      log: () => {}, now: () => 1_700_000_060_000,
+    };
+    const r = await processBasisArbManageTick(makeJob({ entryBasisBps: 20 }), deps);
+    expect(r.status).toBe("complete");
+    if (r.status === "complete") expect(r.reason).toBe("divergence-stop");
+    expect(entries).toHaveLength(1);
+  });
+
+  test("divergence stop does NOT fire when stop=0 (disabled) even on wide divergence", async () => {
+    const deps: BasisArbManageProcessorDeps = {
+      config: makeConfig({ paperTrading: true, basisArbSpreadDivergenceStopBps: 0 }),
+      client: {
+        async getPosition() { return { size: "0.01" }; },
+        async getTicker(p: any) { return { lastPrice: p.category === "linear" ? "50500" : "50000", fundingRate: "0" }; },
+        async createOrder() {},
+      } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50500, spotPrice: 50000 }),
+      alerter: { async send() {} } as any,
+      sharedState: makeShared(),
+      positionLedger: { async appendClosedPosition() {} },
+      log: () => {}, now: () => 1_700_000_060_000,
+    };
+    const r = await processBasisArbManageTick(makeJob({ entryBasisBps: 20 }), deps);
+    // basis 100 bps still > exit threshold (2), still wide → hold
     expect(r.status).toBe("continue");
   });
 

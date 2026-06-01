@@ -1,0 +1,33 @@
+[Unit]
+# Aggressive trader — leveraged directional, separate from conservative pipeline.
+# DANGEROUS by design: leva alta + capital piccolo. The aggressive subsystem
+# is gated by `enabled: true` in apps/trader/config.aggressive.json.
+Description=AI Scalper - aggressive trader (leveraged, capital-tiered)
+After=network-online.target redis.service
+Wants=network-online.target redis.service
+
+[Service]
+Type=simple
+User=assistant
+WorkingDirectory=/home/assistant/projects/ai-scalper/apps/worker
+# Mainnet data, paper execution by default. Switch BYBIT_PAPER_TRADING=false
+# only when you're SURE: at 25x leverage a config mistake = liquidation.
+Environment=BYBIT_BASE_URL=https://api.bybit.com
+Environment=BYBIT_PAPER_TRADING=true
+Environment=CONFIG_FILE=config.paper-pipeline.json
+Environment=AGGRESSIVE_CONFIG_FILE=config.aggressive.json
+Environment=SCAN_SCHEDULE_ENABLED=false
+Environment=LOG_LEVEL=info
+Environment=REDIS_URL=redis://127.0.0.1:6379
+Environment=PATH=/home/assistant/.bun/bin:/usr/local/bin:/usr/bin:/bin
+# IMPORTANT: this entry point must initialize the aggressive stack alongside
+# (or instead of) the conservative one. Session 3 wires the worker bootstrap.
+# For now the unit is authored but NOT INSTALLED — explicit operator action.
+ExecStart=/home/assistant/.bun/bin/bun src/index.ts
+Restart=on-failure
+RestartSec=15
+StandardOutput=append:/tmp/ai-scalper-aggressive.log
+StandardError=append:/tmp/ai-scalper-aggressive.log
+
+[Install]
+WantedBy=multi-user.target

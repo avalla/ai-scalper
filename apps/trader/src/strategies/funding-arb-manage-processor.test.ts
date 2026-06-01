@@ -151,6 +151,30 @@ describe("processFundingArbManageTick", () => {
     expect(deps._ledger.entries).toHaveLength(1);
   });
 
+  test("positionSource is invoked instead of client.getPosition when provided", async () => {
+    let psCalls = 0;
+    let clientCalls = 0;
+    const positionSource = {
+      async getPosition(_symbol: string, _opts?: any) {
+        psCalls += 1;
+        return { symbol: "BTCUSDT", side: "Sell", size: "0", avgPrice: "50000", stopLoss: "", takeProfit: "" };
+      },
+      peek() { return null; },
+    } as any;
+    const client = makeClient({ positionSize: 0 });
+    const origGetPosition = client.getPosition;
+    client.getPosition = async (...args: any[]) => { clientCalls += 1; return origGetPosition.call(client, ...args); };
+    const deps = makeDeps({
+      config: makeConfig({ paperTrading: false }),
+      client, positionSource,
+    });
+    const result = await processFundingArbManageTick(makeJobData(), deps);
+    expect(psCalls).toBe(1);
+    expect(clientCalls).toBe(0);
+    // size 0 → external-close path
+    expect(result.status).toBe("complete");
+  });
+
   test("ticker error keeps the job alive without closing", async () => {
     const failClient = {
       async getTicker() { throw new Error("net"); },

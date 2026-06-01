@@ -16,6 +16,13 @@ export interface LiquidationEntry {
   ts: number;
   side: "Buy" | "Sell";
   sizeUsd: number;
+  /**
+   * Price at which the liquidation printed. OPTIONAL for backward-compat with
+   * existing entries written before the field was introduced; readers that
+   * need price (aggressive subsystem's liquidation-map) skip entries without
+   * it. New pushes from the ws-feeder always include it.
+   */
+  price?: number;
 }
 
 export interface LiquidationsCacheOptions {
@@ -58,6 +65,7 @@ export function createRedisLiquidationsCache(
         ts: trade.ts,
         side: trade.side,
         sizeUsd: trade.sizeUsd,
+        ...(typeof trade.price === "number" && trade.price > 0 ? { price: trade.price } : {}),
         _r: Math.random().toString(36).slice(2, 8),
       });
       const pipeline = redis.multi();
@@ -79,7 +87,9 @@ export function createRedisLiquidationsCache(
             && (parsed.side === "Buy" || parsed.side === "Sell")
             && typeof parsed.sizeUsd === "number"
           ) {
-            out.push({ ts: parsed.ts, side: parsed.side, sizeUsd: parsed.sizeUsd });
+            const entry: LiquidationEntry = { ts: parsed.ts, side: parsed.side, sizeUsd: parsed.sizeUsd };
+            if (typeof parsed.price === "number" && parsed.price > 0) entry.price = parsed.price;
+            out.push(entry);
           }
         } catch {
           /* skip malformed */

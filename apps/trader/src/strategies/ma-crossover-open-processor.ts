@@ -38,11 +38,18 @@ import type { StrategySharedState } from "./shared/bullmq-shared-state";
 import { computeQtyFromNotional, makePositionId } from "./shared/trade-job-helpers";
 import {
   emptyAllocatorState,
+  recordClosedTrade,
   selectChampion,
   type AllocatorState,
 } from "../meta/allocator";
 import { defaultVariantPool, type Variant } from "../meta/variant-pool";
 import type { AllocatorStore } from "./shared/allocator-redis";
+import {
+  emptyVariantState,
+  type VariantShadowMap,
+  type VariantShadowStore,
+} from "./shared/variant-shadow-store";
+import { step, type StepContext, type StepParams } from "../trading/step";
 
 type BybitClient = ReturnType<typeof createBybitClient>;
 
@@ -77,6 +84,13 @@ export interface MaCrossoverOpenProcessorDeps {
   sharedState: StrategySharedState;
   allocatorStore: AllocatorStore;
   priceHistoryStore: PriceHistoryStore;
+  /**
+   * Per-variant shadow state store. When provided, the open processor runs a
+   * paper `step()` for every eligible variant on each tick, feeding the bandit
+   * with non-champion PnL too (closes recorded into the allocator). Omitting it
+   * preserves the original behaviour (champion-only learning).
+   */
+  shadowStore?: VariantShadowStore;
   /** Override the variant pool source (tests). */
   variantPoolFn?: (config: TraderConfig) => Variant[];
   /** Override the champion selector (tests). */
@@ -129,6 +143,82 @@ export async function processMaCrossoverOpenTick(
   if (pool.length === 0) {
     return { status: "skipped", reason: "empty-variant-pool" };
   }
+
+  // (3a) Shadow learning: run a paper step() per variant so non-champion
+  // variants accumulate experience that trains the bandit. Requires a current
+  // ticker + instrument snapshot; if either fetch fails we skip the shadow
+  // pass (champion-only learning, matching the original behaviour) and
+  // continue with the open flow below — the ticker fetch in step (4) will
+  // re-report the same error and short-circuit cleanly.
+  if (deps.shadowStore) {
+    try {
+      const [ticker, instrument] = await Promise.all([
+        tickerSource.getTicker(symbol, { category: "linear" }),
+        client.getInstrumentInfo({ category: "linear", symbol }),
+      ]);
+      const lastPrice = Number(ticker.lastPrice);
+      if (Number.isFinite(lastPrice) && lastPrice > 0) {
+        const eligible = pool.filter(
+          (v) => !v.symbolFilter || v.symbolFilter.includes(symbol),
+        );
+        const prevStates: VariantShadowMap = await deps.shadowStore.load();
+        const nextStates: VariantShadowMap = { ...prevStates };
+        let allocatorChanged = false;
+        for (const variant of eligible) {
+          const prev = prevStates[variant.id] ?? emptyVariantState();
+          const history = [...priceHistoryStore.get(symbol)];
+          history.push(lastPrice);
+          const stepParams: StepParams = {
+            fastWindow: variant.params.fastWindow,
+            slowWindow: variant.params.slowWindow,
+            thresholdBps: variant.params.thresholdBps,
+            stopLossBps: variant.params.stopLossBps,
+            takeProfitBps: variant.params.takeProfitBps,
+            leverage: variant.params.leverage,
+            orderUsd: variant.params.orderUsd,
+            maxPositionUsd: config.maxPositionUsd,
+            maxDailyLossUsd: config.maxDailyLossUsd,
+            maxSpreadBps: config.maxSpreadBps,
+            minTradeIntervalMs: config.minTradeIntervalMs,
+          };
+          const ctxV: StepContext = {
+            symbol, ticker, instrument, now,
+            priceHistory: history,
+            feeRoundTripBps: config.feeRoundTripBps,
+          };
+          const result = step(ctxV, stepParams, prev);
+          // Detect close via realizedPnlUsd delta: updatePaperState only adds
+          // to this counter when a position is closed, so any non-zero delta
+          // means a paper trade settled this tick (covers the close-then-
+          // immediately-reopen case that a plain `position → null` check misses).
+          const pnlDelta = (result.state.realizedPnlUsd ?? 0) - (prev.realizedPnlUsd ?? 0);
+          if (pnlDelta !== 0) {
+            allocator = recordClosedTrade(
+              allocator, variant.id, pnlDelta, now,
+              config.metaPnlWindowSize,
+            );
+            allocatorChanged = true;
+            log({
+              ts: observedAt, event: "ma-crossover-shadow-close",
+              variantId: variant.id, pnlDelta,
+              symbol, isChampion: false /* selector hasn't picked yet */,
+            });
+          }
+          nextStates[variant.id] = result.state;
+        }
+        await deps.shadowStore.save(nextStates);
+        if (allocatorChanged) await allocatorStore.save(allocator);
+      }
+    } catch (err) {
+      log({
+        ts: observedAt, event: "ma-crossover-shadow-pass-failed",
+        symbol, error: err instanceof Error ? err.message : String(err),
+      });
+      // Non-fatal: continue with champion selection on the (possibly stale)
+      // allocator state — same effective behaviour as the no-shadow path.
+    }
+  }
+
   const sel = selectChampionFn({
     allocator, variants: pool, now,
     warmupMinTrades: config.metaWarmupMinTrades,
