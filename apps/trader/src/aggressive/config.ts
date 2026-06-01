@@ -9,6 +9,41 @@ import { dirname, isAbsolute, join } from "node:path";
 import type { AggressiveTierLadder } from "./types";
 import { validateTierLadder } from "./tier-engine";
 
+export interface PumpScannerSubsystemConfig {
+  /** Master switch for the pump-scanner sub-pipeline. */
+  enabled: boolean;
+  /** Tick of the scanner evaluate loop in ms. Default 5000. */
+  evaluateTickMs: number;
+  /** How often to refresh the universe (filtered instrument list) in ms. Default 300_000 (5 min). */
+  universeRefreshMs: number;
+  /** Rolling window length (ms) used for anomaly detection. Default 300_000 (5 min). */
+  windowMs: number;
+  /** Liquidity criteria for universe selection. */
+  liquidity: { min24hTurnoverUsd: number; maxSpreadBps: number; minBookDepthUsd: number };
+  /** Anomaly trigger thresholds. */
+  anomaly: { priceChangeBpsThreshold: number; volumeMultipleThreshold: number; minWindowVolumeUsd: number };
+  /** LLM analyzer settings. */
+  llm: {
+    /** Set true to actually call Claude; false leaves the scanner in dry-run (logs anomalies, no trades). */
+    enabled: boolean;
+    /** Min confidence on an "enter" signal to actually trade. Below → treated as skip. */
+    minConfidence: number;
+    /** Anthropic model id. */
+    model: string;
+  };
+  /** Sizing applied when the LLM signal passes — runs OUTSIDE the tier ladder. */
+  sizing: {
+    /** Notional USD per single trade. */
+    maxNotionalUsdPerTrade: number;
+    /** Leverage on the perp leg. Hard-capped by MAX_LEVERAGE_ALLOWED in config.ts. */
+    leverage: number;
+  };
+  /** Optional symbol whitelist; null = all that pass liquidity. */
+  symbolWhitelist: readonly string[] | null;
+  /** Optional symbol blacklist. */
+  symbolBlacklist: readonly string[];
+}
+
 export interface AggressiveSubsystemConfig {
   /** Master switch — even with the file present, must be true to start. */
   enabled: boolean;
@@ -36,6 +71,8 @@ export interface AggressiveSubsystemConfig {
   maxHoldSec: number;
   /** Equity-tiered ladder. Must pass validateTierLadder. */
   tierLadder: AggressiveTierLadder;
+  /** Optional pump-scanner sub-pipeline (LLM-driven). When absent, defaults to disabled. */
+  pumpScanner?: PumpScannerSubsystemConfig;
 }
 
 function resolveConfigFile(name: string, fallbackDir: string): string | null {
@@ -77,5 +114,21 @@ export function loadAggressiveConfig(): AggressiveSubsystemConfig | null {
     throw new Error("aggressive config: tierLadder is required");
   }
   validateTierLadder(cfg.tierLadder);
+  // Optional pump-scanner block — defaults to disabled when absent.
+  if (raw.pumpScanner) {
+    const p = raw.pumpScanner as Partial<PumpScannerSubsystemConfig>;
+    cfg.pumpScanner = {
+      enabled: p.enabled ?? false,
+      evaluateTickMs: p.evaluateTickMs ?? 5_000,
+      universeRefreshMs: p.universeRefreshMs ?? 300_000,
+      windowMs: p.windowMs ?? 300_000,
+      liquidity: { min24hTurnoverUsd: p.liquidity?.min24hTurnoverUsd ?? 10_000_000, maxSpreadBps: p.liquidity?.maxSpreadBps ?? 5, minBookDepthUsd: p.liquidity?.minBookDepthUsd ?? 0 },
+      anomaly: { priceChangeBpsThreshold: p.anomaly?.priceChangeBpsThreshold ?? 200, volumeMultipleThreshold: p.anomaly?.volumeMultipleThreshold ?? 2.0, minWindowVolumeUsd: p.anomaly?.minWindowVolumeUsd ?? 50_000 },
+      llm: { enabled: p.llm?.enabled ?? false, minConfidence: p.llm?.minConfidence ?? 0.6, model: p.llm?.model ?? "claude-haiku-4-5-20251001" },
+      sizing: { maxNotionalUsdPerTrade: p.sizing?.maxNotionalUsdPerTrade ?? 50, leverage: p.sizing?.leverage ?? 10 },
+      symbolWhitelist: p.symbolWhitelist ?? null,
+      symbolBlacklist: p.symbolBlacklist ?? [],
+    };
+  }
   return cfg;
 }

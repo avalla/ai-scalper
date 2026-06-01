@@ -261,6 +261,67 @@ redis-cli LRANGE ai-scalper:aggressive:positions:closed 0 -1 \
   | jq -s 'if length==0 then "no aggressive trades yet" else {trades:length, gross:(map(.grossPnlUsd)|add), fees:(map(.feeUsd)|add), net:(map(.realizedPnlUsd)|add), avg_net:((map(.realizedPnlUsd)|add)/length), wins:(map(select(.realizedPnlUsd>0))|length), losses:(map(select(.realizedPnlUsd<=0))|length)} end'
 ```
 
+### Pump-scanner sub-pipeline (optional, inside aggressive config)
+
+The aggressive subsystem can run TWO evaluators in parallel that share the
+SAME manage queue + ledger + daily-state (and therefore the one-position
+invariant — only one trade open at a time across all aggressive sources):
+
+1. **liquidation-hunter** (existing) — reads Bybit WS liquidation cascade
+   events directly. Reactive: enters on confirmed cascade signals.
+2. **pump-scanner** (new) — scans the entire liquid universe of linear perps,
+   detects price/volume anomalies, and (optionally) sends the candidate to a
+   Claude LLM that decides whether to enter and with what stop/TP.
+
+#### Pipeline
+```
+[universe fetcher] → liquidity filter → active symbols
+       ↓
+[rolling-window store] ← ticker push every tick
+       ↓
+[pump-scanner: scanSymbol per symbol] → anomaly detected?
+       ↓
+[Claude analyzer] ← if llm.enabled (otherwise dry-run logs only)
+       ↓
+[guards: daily-cap, max-trades, capital-cap]
+       ↓
+[placeAggressiveEntry] → shared aggressive-manage queue
+       ↓
+[manage worker: stop / TP / max-hold every 2s]
+```
+
+#### Activating
+
+Edit `config.aggressive.json`, set both `enabled: true` AND the sub-block:
+```jsonc
+"pumpScanner": {
+  "enabled": true,
+  "evaluateTickMs": 5000,
+  "universeRefreshMs": 300000,
+  "windowMs": 300000,
+  "liquidity": { "min24hTurnoverUsd": 10000000, "maxSpreadBps": 5, "minBookDepthUsd": 0 },
+  "anomaly": { "priceChangeBpsThreshold": 200, "volumeMultipleThreshold": 2.0, "minWindowVolumeUsd": 50000 },
+  "llm": { "enabled": false, "minConfidence": 0.6, "model": "claude-haiku-4-5-20251001" },
+  "sizing": { "maxNotionalUsdPerTrade": 50, "leverage": 10 },
+  "symbolBlacklist": ["USDC", "DAI"]
+}
+```
+
+**Strongly recommended**: leave `llm.enabled: false` for the first 24-72h so the
+scanner runs in DRY-RUN. Check `/tmp/ai-scalper-paper.log` for
+`pump-scanner-anomaly-detected` events to confirm the anomaly rate is
+reasonable (5-20/day expected). Only then enable the LLM.
+
+Requires `ANTHROPIC_API_KEY` in the systemd unit environment when LLM is on.
+
+#### One-position invariant (important)
+
+Both `liquidation-hunter` and `pump-scanner` check the SAME
+`aggressive-manage` BullMQ queue before opening. If a trade is open, neither
+will open another. Whichever evaluator triggers first wins the slot. This is
+intentional risk management at high leverage; do not change without adding
+correlation-aware portfolio sizing.
+
 ### Disable
 Set `"enabled": false` in `config.aggressive.json` and restart, or remove
 the file entirely. The conservative pipeline continues unchanged.

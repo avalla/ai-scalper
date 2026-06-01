@@ -17,5 +17,18 @@
     { "minEquity": 200,   "maxEquity": 1000,          "leverage": 10, "maxNotionalPerTrade": 200,  "strategy": "liquidation-hunter", "hardStopFraction": 0.03, "takeProfitFraction": 0.06 },
     { "minEquity": 1000,  "maxEquity": 10000,         "leverage": 5,  "maxNotionalPerTrade": 1000, "strategy": "liquidation-hunter", "hardStopFraction": 0.04, "takeProfitFraction": 0.08 },
     { "minEquity": 10000, "maxEquity": 100000000000,  "leverage": 2,  "maxNotionalPerTrade": 5000, "strategy": "liquidation-hunter", "hardStopFraction": 0.05, "takeProfitFraction": 0.10 }
-  ]
+  ],
+  "pumpScanner": {
+    "_comment": "Optional LLM-driven pump scanner. Shares manage queue + ledger with liquidation-hunter (one-position invariant across both). Start with llm.enabled=false for dry-run.",
+    "enabled": true,
+    "evaluateTickMs": 5000,
+    "universeRefreshMs": 300000,
+    "windowMs": 300000,
+    "liquidity": { "min24hTurnoverUsd": 10000000, "maxSpreadBps": 5, "minBookDepthUsd": 0 },
+    "anomaly": { "priceChangeBpsThreshold": 200, "volumeMultipleThreshold": 2.0, "minWindowVolumeUsd": 50000 },
+    "llm": { "enabled": false, "minConfidence": 0.6, "model": "claude-haiku-4-5-20251001" },
+    "sizing": { "maxNotionalUsdPerTrade": 50, "leverage": 10 },
+    "symbolWhitelist": null,
+    "symbolBlacklist": ["USDC", "DAI"]
+  }
 }

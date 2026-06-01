@@ -24,6 +24,7 @@ import { startLiquidationCascadeWorkerStack, type LiquidationCascadeWorkerStack 
 import { startPipelineWorkerStack, type PipelineWorkerStack } from "./pipeline-workers";
 import { startAggressiveWorkerStack, type AggressiveWorkerStack } from "./aggressive-workers";
 import { loadAggressiveConfig } from "../../trader/src/aggressive/config";
+import { startPumpScannerWorkerStack, type PumpScannerWorkerStack } from "./pump-scanner-worker";
 
 const scanJobTimeoutMs = Number(process.env.SCAN_JOB_TIMEOUT_MS || "30000");
 const scanScheduleEnabled = process.env.SCAN_SCHEDULE_ENABLED !== "false";
@@ -337,6 +338,7 @@ let maCrossoverStack: MaCrossoverWorkerStack | null = null;
 let liquidationCascadeStack: LiquidationCascadeWorkerStack | null = null;
 let pipelineStack: PipelineWorkerStack | null = null;
 let aggressiveStack: AggressiveWorkerStack | null = null;
+let pumpScannerStack: PumpScannerWorkerStack | null = null;
 /** Optional ws-feeder subprocess (spawned by main() when USE_WEBSOCKET=true). */
 let wsFeederProcess: ReturnType<typeof Bun.spawn> | null = null;
 
@@ -499,6 +501,16 @@ async function main(): Promise<void> {
       activeQueues.push("aggressive-evaluate", "aggressive-manage");
       aggressiveStack.evalWorker.on("failed", logFailure("aggressive-evaluate"));
       aggressiveStack.manageWorker.on("failed", logFailure("aggressive-manage"));
+
+      // Pump-scanner is OPTIONAL inside the aggressive config — shares the same
+      // manage queue + ledger + daily-state. Both producers, one consumer.
+      if (aggressiveCfg.pumpScanner?.enabled) {
+        pumpScannerStack = await startPumpScannerWorkerStack({
+          connection, traderConfig: cfg, aggressive: aggressiveCfg,
+        });
+        activeQueues.push("pump-scanner-evaluate");
+        pumpScannerStack.evalWorker.on("failed", logFailure("pump-scanner-evaluate"));
+      }
     }
   } catch (err) {
     console.warn(JSON.stringify({
@@ -596,6 +608,10 @@ async function shutdown(signal: string): Promise<void> {
     if (aggressiveStack) {
       await aggressiveStack.shutdown();
       console.log(JSON.stringify({ event: "shutdown-progress", step: "aggressive-stack-closed" }));
+    }
+    if (pumpScannerStack) {
+      await pumpScannerStack.shutdown();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "pump-scanner-stack-closed" }));
     }
     if (wsFeederProcess && !wsFeederProcess.killed) {
       try { wsFeederProcess.kill("SIGTERM"); } catch { /* ignore */ }
