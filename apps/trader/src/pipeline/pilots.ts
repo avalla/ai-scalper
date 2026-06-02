@@ -32,6 +32,7 @@ import {
   pairsTradingEvaluator,
 } from "./pilots-spread";
 import { placeOrderWithMakerPreference, type OrderCategory, type OrderSide } from "./maker-execution";
+import { ensureCrossMargin } from "./cross-margin";
 
 // ── funding-arb ───────────────────────────────────────────────────────────
 
@@ -247,10 +248,9 @@ export const basisArbAdapter: ExecutionAdapter = async (intent, ctx): Promise<Ex
   };
 
   if (!config.paperTrading) {
-    // Leverage upsert on the perp leg (spot has no leverage).
+    // Cross margin + leverage on the perp leg (spot has no leverage).
     if (intent.leverage > 1) {
-      try { await client.setLeverage({ category: "linear", symbol: perpLeg.symbol, buyLeverage: String(intent.leverage), sellLeverage: String(intent.leverage) }); }
-      catch (err) { log({ ts: observedAt, event: "basis-arb-set-leverage-failed", err: err instanceof Error ? err.message : String(err) }); }
+      await ensureCrossMargin({ client, category: "linear", symbol: perpLeg.symbol, leverage: intent.leverage, log: (p) => log({ ts: observedAt, ...p }) });
     }
     // Leg 1: perp
     try {

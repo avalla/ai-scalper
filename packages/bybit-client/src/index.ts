@@ -112,6 +112,15 @@ export interface CreateOrderResponse {
   orderLinkId: string;
 }
 
+export interface SwitchPositionMarginModeRequest {
+  category: string;
+  symbol: string;
+  /** 0 = cross, 1 = isolated. */
+  tradeMode: 0 | 1;
+  buyLeverage: string;
+  sellLeverage: string;
+}
+
 export interface RealtimeOrder {
   orderId: string;
   orderLinkId: string;
@@ -374,6 +383,38 @@ export function createBybitClient(options: BybitClientOptions = {}) {
       }
       if (data.retCode !== 0) {
         throw new Error(`Bybit set leverage failed: ${data.retMsg}`);
+      }
+      return { alreadySet: false };
+    },
+
+    /**
+     * Switch margin mode for a position (cross vs isolated). Works on Classic
+     * accounts (per-symbol) and on UTA where per-position override is allowed.
+     * Returns `{alreadySet:true}` on Bybit code 110026 ("already in this mode")
+     * so callers can call this idempotently before every entry without errors.
+     * Also accepts leverage in the same request body — Bybit applies it
+     * together with the mode switch.
+     */
+    async switchPositionMarginMode(request: SwitchPositionMarginModeRequest): Promise<{ alreadySet: boolean }> {
+      const apiKey = options.apiKey || requiredEnv("BYBIT_API_KEY");
+      const apiSecret = options.apiSecret || requiredEnv("BYBIT_API_SECRET");
+      const data = await signedRequest<BybitSingleResponse<unknown>>({
+        apiKey, apiSecret, baseUrl, recvWindow,
+        method: "POST",
+        path: "/v5/position/switch-isolated",
+        body: {
+          category: request.category,
+          symbol: request.symbol,
+          tradeMode: request.tradeMode,
+          buyLeverage: request.buyLeverage,
+          sellLeverage: request.sellLeverage,
+        },
+      });
+      // 110026 = already in the requested margin mode (idempotent success).
+      // 110043 = leverage already set to this value (same call carries leverage).
+      if (data.retCode === 110026 || data.retCode === 110043) return { alreadySet: true };
+      if (data.retCode !== 0) {
+        throw new Error(`Bybit switch margin mode failed: ${data.retMsg}`);
       }
       return { alreadySet: false };
     },

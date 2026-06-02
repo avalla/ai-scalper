@@ -19,6 +19,7 @@ import { pairsDecide, type PairsCache } from "../strategies/pairs-trading";
 import { computeQtyFromNotional, makePositionId } from "../strategies/shared/trade-job-helpers";
 import type { ExecutionAdapter, ExecutionResult, StrategyEvaluator } from "./types";
 import { placeOrderWithMakerPreference, type OrderCategory, type OrderSide } from "./maker-execution";
+import { ensureCrossMargin } from "./cross-margin";
 
 // ── calendar-spread (two-leg: perp + dated, both linear) ───────────────────
 
@@ -104,11 +105,10 @@ export const calendarSpreadAdapter: ExecutionAdapter = async (intent, ctx): Prom
   };
 
   if (!config.paperTrading) {
-    // Leverage upsert on both linear legs (no-op on Bybit if already set).
+    // Ensure cross margin + leverage on both linear legs (idempotent).
     if (intent.leverage > 1) {
       for (const leg of [perpLeg, datedLeg]) {
-        try { await client.setLeverage({ category: "linear", symbol: leg.symbol, buyLeverage: String(intent.leverage), sellLeverage: String(intent.leverage) }); }
-        catch (err) { log({ ts: observedAt, event: "calendar-spread-set-leverage-failed", symbol: leg.symbol, err: err instanceof Error ? err.message : String(err) }); }
+        await ensureCrossMargin({ client, category: "linear", symbol: leg.symbol, leverage: intent.leverage, log: (p) => log({ ts: observedAt, ...p }) });
       }
     }
     try {

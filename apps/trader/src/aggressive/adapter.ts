@@ -16,6 +16,7 @@ import type { WebhookAlerter } from "../alerts/webhook";
 import type { AggressiveIntent } from "./types";
 import type { DailyStateStore } from "./daily-state";
 import { computeQtyFromNotional, makePositionId } from "../strategies/shared/trade-job-helpers";
+import { ensureCrossMargin } from "../pipeline/cross-margin";
 
 type BybitClient = ReturnType<typeof createBybitClient>;
 
@@ -91,14 +92,10 @@ export async function placeAggressiveEntry(
   }
 
   if (!deps.config.paperTrading) {
-    try {
-      await deps.client.setLeverage({
-        category: "linear", symbol,
-        buyLeverage: String(intent.leverage), sellLeverage: String(intent.leverage),
-      });
-    } catch (err) {
-      log({ ts: observedAt, event: "aggressive-set-leverage-failed", err: err instanceof Error ? err.message : String(err) });
-    }
+    // Cross margin + leverage in one idempotent call. Critical at leva 10-25:
+    // isolated would put the perp leg one adverse tick away from liquidation
+    // even on a normal basis divergence.
+    await ensureCrossMargin({ client: deps.client, category: "linear", symbol, leverage: intent.leverage, log: (p) => log({ ts: observedAt, ...p }) });
     try {
       await deps.client.createOrder({
         category: "linear", symbol,
