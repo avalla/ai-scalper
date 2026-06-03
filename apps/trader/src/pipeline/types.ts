@@ -14,6 +14,7 @@ import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import type { StrategySharedState } from "../strategies/shared/bullmq-shared-state";
+import type { CalendarRotator } from "./calendar-rotator";
 
 export type BybitClient = ReturnType<typeof createBybitClient>;
 
@@ -30,6 +31,8 @@ export interface StrategyEvaluatorContext {
   tickerSource: TickerSource;
   now: number;
   log: (payload: Record<string, unknown>) => void;
+  /** Optional auto-rotator for the dated leg of calendar-spread. */
+  calendarRotator?: CalendarRotator | null;
 }
 
 /**

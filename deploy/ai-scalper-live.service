@@ -1,0 +1,21 @@
+# MAINNET LIVE trading — real Bybit orders on real wallet.
+# Calendar-spread only; aggressive subsystem disabled; isolated Redis DB.
+# Secrets live in /etc/ai-scalper/live.env (0600 root:root, gitignored).
+[Unit]
+Description=AI Scalper - LIVE pipeline (mainnet trading)
+After=network-online.target redis.service ai-scalper-paper.service
+Wants=network-online.target redis.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/assistant/projects/ai-scalper/apps/worker
+EnvironmentFile=/etc/ai-scalper/live.env
+User=assistant
+ExecStart=/home/assistant/.bun/bin/bun src/index.ts
+Restart=on-failure
+RestartSec=15
+StandardOutput=append:/tmp/ai-scalper-live.log
+StandardError=append:/tmp/ai-scalper-live.log
+
+[Install]
+WantedBy=multi-user.target

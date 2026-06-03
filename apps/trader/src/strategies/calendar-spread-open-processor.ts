@@ -16,6 +16,7 @@ import type { TraderConfig } from "../config";
 import type { WebhookAlerter } from "../alerts/webhook";
 import { calendarDecide, computeCalendarSpreadBps } from "./calendar-spread";
 import type { StrategySharedState } from "./shared/bullmq-shared-state";
+import type { CalendarRotator } from "../pipeline/calendar-rotator";
 import { computeQtyFromNotional, makePositionId } from "./shared/trade-job-helpers";
 
 type BybitClient = ReturnType<typeof createBybitClient>;
@@ -31,6 +32,8 @@ export interface CalendarSpreadOpenProcessorDeps {
   alerter: WebhookAlerter;
   manageQueue: ManageQueueLike<CalendarSpreadManageJobData>;
   sharedState: StrategySharedState;
+  /** Auto-rotates dated leg as quarterlies settle. Optional — falls back to config. */
+  rotator?: CalendarRotator | null;
   decideFn?: typeof calendarDecide;
   log?: (payload: Record<string, unknown>) => void;
   now?: () => number;
@@ -63,7 +66,13 @@ export async function processCalendarSpreadOpenTick(
   const now = (deps.now ?? Date.now)();
   const observedAt = new Date(now).toISOString();
 
-  if (!config.calendarDatedSymbol || config.calendarDatedDeliveryAt <= 0) {
+  // Resolve dated leg: rotator first (auto-advances across quarterlies),
+  // fallback to static config. Manage processor reads from job-state, not from
+  // here, so existing positions are unaffected when the rotator switches.
+  const rotated = deps.rotator ? await deps.rotator.getCurrent() : null;
+  const datedSymbol = rotated?.symbol ?? config.calendarDatedSymbol;
+  const datedDeliveryAt = rotated?.deliveryAt ?? config.calendarDatedDeliveryAt;
+  if (!datedSymbol || datedDeliveryAt <= 0) {
     return { status: "skipped", reason: "dated-symbol-or-delivery-not-configured" };
   }
 
@@ -75,7 +84,7 @@ export async function processCalendarSpreadOpenTick(
   try {
     const [perpT, datedT] = await Promise.all([
       tickerSource.getTicker(config.calendarPerpSymbol, { category: "linear" }),
-      tickerSource.getTicker(config.calendarDatedSymbol, { category: "linear" }),
+      tickerSource.getTicker(datedSymbol, { category: "linear" }),
     ]);
     perpPrice = Number(perpT.lastPrice);
     datedPrice = Number(datedT.lastPrice);
@@ -92,7 +101,7 @@ export async function processCalendarSpreadOpenTick(
 
   const decision = decideFn({
     perpPrice, datedPrice,
-    datedDeliveryAt: config.calendarDatedDeliveryAt,
+    datedDeliveryAt,
     now, position: null,
     config: {
       entryThresholdBps: config.calendarEntryThresholdBps,
@@ -108,7 +117,7 @@ export async function processCalendarSpreadOpenTick(
   try {
     [perpInstr, datedInstr] = await Promise.all([
       client.getInstrumentInfo({ category: "linear", symbol: config.calendarPerpSymbol }),
-      client.getInstrumentInfo({ category: "linear", symbol: config.calendarDatedSymbol }),
+      client.getInstrumentInfo({ category: "linear", symbol: datedSymbol }),
     ]);
   } catch (err) {
     log({
@@ -143,7 +152,7 @@ export async function processCalendarSpreadOpenTick(
     }
     try {
       await client.createOrder({
-        category: "linear", symbol: config.calendarDatedSymbol,
+        category: "linear", symbol: datedSymbol,
         side: decision.datedSide === "long" ? "Buy" : "Sell",
         qty: q.qtyStr, orderType: "Market",
       });
@@ -173,12 +182,12 @@ export async function processCalendarSpreadOpenTick(
   const entrySpreadBps = computeCalendarSpreadBps(perpPrice, datedPrice);
   const positionId = makePositionId({
     strategy: "calendar-spread", now,
-    discriminator: `${config.calendarPerpSymbol}-${config.calendarDatedSymbol}`,
+    discriminator: `${config.calendarPerpSymbol}-${datedSymbol}`,
   });
   const manageData: CalendarSpreadManageJobData = {
     positionId,
     perpSymbol: config.calendarPerpSymbol,
-    datedSymbol: config.calendarDatedSymbol,
+    datedSymbol: datedSymbol,
     perpSide: decision.perpSide, datedSide: decision.datedSide,
     perpEntryPrice: perpPrice, datedEntryPrice: datedPrice,
     qty: q.qty,
@@ -187,7 +196,7 @@ export async function processCalendarSpreadOpenTick(
     notionalPerLegUsd,
     openedAt: new Date(now).toISOString(),
     entrySpreadBps,
-    datedDeliveryAt: config.calendarDatedDeliveryAt,
+    datedDeliveryAt,
     decisionsHistory: [{
       at: new Date(now).toISOString(),
       action: "enter", reasoning: decision.reason,
@@ -202,7 +211,7 @@ export async function processCalendarSpreadOpenTick(
 
   log({
     ts: observedAt, event: "calendar-spread-opened",
-    positionId, perpSymbol: config.calendarPerpSymbol, datedSymbol: config.calendarDatedSymbol,
+    positionId, perpSymbol: config.calendarPerpSymbol, datedSymbol: datedSymbol,
     perpSide: decision.perpSide, datedSide: decision.datedSide,
     perpEntryPrice: perpPrice, datedEntryPrice: datedPrice, entrySpreadBps,
   });
@@ -210,7 +219,7 @@ export async function processCalendarSpreadOpenTick(
   return {
     status: "opened",
     positionId,
-    perpSymbol: config.calendarPerpSymbol, datedSymbol: config.calendarDatedSymbol,
+    perpSymbol: config.calendarPerpSymbol, datedSymbol: datedSymbol,
     perpSide: decision.perpSide, datedSide: decision.datedSide,
     qty: q.qty, perpEntryPrice: perpPrice, datedEntryPrice: datedPrice,
     notionalPerLegUsd, entrySpreadBps,

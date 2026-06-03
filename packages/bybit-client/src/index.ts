@@ -13,6 +13,15 @@ export type InstrumentInfoRequest = {
   symbol: string;
 };
 
+export type ListInstrumentsRequest = {
+  category: string;
+  baseCoin?: string;
+  /** "LinearPerpetual" | "LinearFutures" | "InverseFutures" — pass-through filter. */
+  contractType?: string;
+  /** Bybit caps at 1000; we paginate via cursor if needed. */
+  limit?: number;
+};
+
 export type KlineRequest = {
   category: string;
   symbol: string;
@@ -41,6 +50,13 @@ export type MarketTicker = {
 
 export interface InstrumentInfo {
   symbol: string;
+  /** "LinearPerpetual" | "LinearFutures" | "InverseFutures" | "Spot". Present on linear/inverse. */
+  contractType?: string;
+  /** Unix ms as string. "0" for perpetuals; future settlement time for dated futures. */
+  deliveryTime?: string;
+  baseCoin?: string;
+  quoteCoin?: string;
+  status?: string;
   leverageFilter: {
     minLeverage: string;
     maxLeverage: string;
@@ -315,6 +331,23 @@ export function createBybitClient(options: BybitClientOptions = {}) {
       }
 
       return data.result.list[0];
+    },
+
+    async listInstruments(request: ListInstrumentsRequest): Promise<InstrumentInfo[]> {
+      const queryParams: Record<string, string> = {
+        category: request.category,
+        limit: String(request.limit ?? 1000),
+      };
+      if (request.baseCoin) queryParams.baseCoin = request.baseCoin;
+      const query = createQuery(queryParams);
+      const response = await fetch(`${baseUrl}/v5/market/instruments-info?${query}`);
+      const data = await parseJson<BybitListResponse<InstrumentInfo>>(response);
+      if (!response.ok || data.retCode !== 0) {
+        throw new Error(`Bybit instruments list failed: ${data.retMsg || response.statusText}`);
+      }
+      const list = data.result?.list ?? [];
+      if (request.contractType) return list.filter((i) => i.contractType === request.contractType);
+      return list;
     },
 
     async getKlines(request: KlineRequest): Promise<MarketKline[]> {

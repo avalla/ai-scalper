@@ -36,6 +36,7 @@ import {
 import { createPositionLedger } from "../../trader/src/trading/position-ledger";
 import { safeRemoveRepeatable, type RepeatableQueueLike } from "../../trader/src/strategies/shared/trade-job-helpers";
 import { processStrategyEvaluateTick } from "../../trader/src/pipeline/strategy-evaluate-processor";
+import { createCalendarRotator } from "../../trader/src/pipeline/calendar-rotator";
 import { processTradingAgentExecute } from "../../trader/src/pipeline/trading-agent-processor";
 import { PILOT_ADAPTERS, PILOT_EVALUATORS } from "../../trader/src/pipeline/pilots";
 import type { QueueLike } from "../../trader/src/pipeline/types";
@@ -48,7 +49,22 @@ import { processPairsTradingManageTick } from "../../trader/src/strategies/pairs
 import { createInMemoryPairsCacheStore } from "../../trader/src/strategies/pairs-trading-open-processor";
 
 /** Strategies driven by the pipeline pilot. */
-const PILOT_STRATEGIES = ["funding-arb", "basis-arb", "longer-tf", "bollinger-adx", "calendar-spread", "pairs-trading"] as const;
+const ALL_PILOT_STRATEGIES = ["funding-arb", "basis-arb", "longer-tf", "bollinger-adx", "calendar-spread", "pairs-trading"] as const;
+type PilotStrategy = typeof ALL_PILOT_STRATEGIES[number];
+// Optional scope: env PIPELINE_STRATEGIES="calendar-spread,basis-arb" → only those run.
+// Empty/missing → all six. Used by the live unit to start with calendar-spread only.
+function selectStrategies(): readonly PilotStrategy[] {
+  const raw = process.env.PIPELINE_STRATEGIES?.trim();
+  if (!raw) return ALL_PILOT_STRATEGIES;
+  const requested = new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
+  const filtered = ALL_PILOT_STRATEGIES.filter((s) => requested.has(s));
+  if (filtered.length === 0) {
+    console.warn(JSON.stringify({ event: "pipeline-strategies-env-invalid", raw, falling_back_to: "all" }));
+    return ALL_PILOT_STRATEGIES;
+  }
+  return filtered;
+}
+const PILOT_STRATEGIES = selectStrategies();
 
 export interface PipelineWorkerStack {
   evaluateQueue: Queue<StrategyEvaluateJobData>;
@@ -92,6 +108,10 @@ export async function startPipelineWorkerStack(deps: {
     : createRestTickerSource(client);
   const alerter = createWebhookAlerter(config.alertWebhookUrl);
   const positionLedger = createPositionLedger();
+  // Auto-rotates the dated leg as quarterlies settle. baseCoin inferred from
+  // the perp symbol (BTCUSDT → BTC). Refresh hourly; the REST call is cheap.
+  const rotatorBaseCoin = (config.calendarPerpSymbol || "BTCUSDT").replace(/USDT$|USDC$/, "") || "BTC";
+  const calendarRotator = createCalendarRotator(client, { baseCoin: rotatorBaseCoin, refreshMs: 60 * 60_000 });
 
   // Per-strategy manage queues + their shared state (reused from Phase 2).
   const manageQueueByStrategy: Record<string, Queue> = {};
@@ -129,6 +149,7 @@ export async function startPipelineWorkerStack(deps: {
         config, client, tickerSource,
         registry: PILOT_EVALUATORS as any,
         intentQueue: agentQueue,
+        calendarRotator,
       });
     },
     { connection, concurrency: 1 },

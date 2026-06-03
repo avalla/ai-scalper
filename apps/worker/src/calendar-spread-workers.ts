@@ -15,6 +15,7 @@ import { createStrategySharedState, type StrategySharedState } from "../../trade
 import { processCalendarSpreadOpenTick } from "../../trader/src/strategies/calendar-spread-open-processor";
 import { processCalendarSpreadManageTick } from "../../trader/src/strategies/calendar-spread-manage-processor";
 import { createPositionLedger } from "../../trader/src/trading/position-ledger";
+import { createCalendarRotator } from "../../trader/src/pipeline/calendar-rotator";
 import { makeOpenTickJobId, safeRemoveRepeatable } from "../../trader/src/strategies/shared/trade-job-helpers";
 
 export interface CalendarSpreadWorkerStack {
@@ -48,12 +49,14 @@ export async function startCalendarSpreadWorkerStack(deps: {
   const alerter = createWebhookAlerter(config.alertWebhookUrl);
   const positionLedger = createPositionLedger();
   const sharedState = createStrategySharedState({ strategy: "calendar-spread", redis: connection, manageQueue });
+  const rotatorBaseCoin = (config.calendarPerpSymbol || "BTCUSDT").replace(/USDT$|USDC$/, "") || "BTC";
+  const rotator = createCalendarRotator(client, { baseCoin: rotatorBaseCoin, refreshMs: 60 * 60_000 });
 
   const openWorker = new Worker<CalendarSpreadOpenTickJobData>(
     QUEUE_NAMES.calendarSpreadOpenDecision,
     async (job) => {
       if (job.name !== JOB_NAMES.calendarSpreadOpenTick) throw new Error(`Unsupported job name: ${job.name}`);
-      return processCalendarSpreadOpenTick(job.data, { config, client, tickerSource, alerter, manageQueue, sharedState });
+      return processCalendarSpreadOpenTick(job.data, { config, client, tickerSource, alerter, manageQueue, sharedState, rotator });
     },
     { connection, concurrency: 1 },
   );

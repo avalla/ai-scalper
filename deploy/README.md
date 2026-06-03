@@ -326,6 +326,94 @@ correlation-aware portfolio sizing.
 Set `"enabled": false` in `config.aggressive.json` and restart, or remove
 the file entirely. The conservative pipeline continues unchanged.
 
+## LIVE trading — go-live runbook (calendar-spread only)
+
+The `ai-scalper-live.service` runs the Phase-3 pipeline against the **real
+Bybit mainnet wallet**, scoped narrowly:
+
+- only `calendar-spread` (env `PIPELINE_STRATEGIES=calendar-spread`)
+- aggressive subsystem disabled (`config.aggressive.live.json` `enabled:false`)
+- dedicated **Redis DB 1** (paper stays on DB 0 — no ledger collision)
+- own log file `/tmp/ai-scalper-live.log`
+- runs **in parallel** with `ai-scalper-paper.service` for empirical
+  paper→live erosion measurement
+
+### One-time operator setup
+
+1. **Generate Bybit API key** on the *mainnet* account, with:
+   - `Read-Write` on Contract Trading
+   - `Read` on Wallet
+   - **NO** Withdraw permission
+   - IP whitelist: this server's egress IP (`curl ifconfig.me`)
+
+2. **Fund the wallet** with the agreed amount ($50 USDT in UNIFIED for phase 1).
+
+3. **Set Cross Margin** on the unified account via Bybit UI (one-time global
+   setting; `ensureCrossMargin` handles per-symbol toggles after that).
+
+4. **Install env file** (secrets — NEVER commit):
+   ```bash
+   sudo mkdir -p /etc/ai-scalper
+   sudo cp deploy/live.env.example /etc/ai-scalper/live.env
+   sudo chmod 600 /etc/ai-scalper/live.env
+   sudo chown root:root /etc/ai-scalper/live.env
+   sudoedit /etc/ai-scalper/live.env   # paste real BYBIT_API_KEY/SECRET
+   ```
+
+5. **Install systemd unit**:
+   ```bash
+   sudo cp deploy/ai-scalper-live.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   ```
+
+### Preflight (run BEFORE every fresh enable, ~5s)
+
+```bash
+cd /home/assistant/projects/ai-scalper/apps/worker
+sudo -u assistant env $(grep -v '^#' /etc/ai-scalper/live.env | xargs) \
+  bun run ../trader/src/scripts/live-preflight.ts
+```
+
+Validates: mainnet URL, paperTrading=false, API keys, wallet balance ≥ $30,
+instrument info, calendar-rotator pick, cross-margin/leverage round-trip,
+Redis reachability + DB isolation. Exit 0 = safe to start.
+
+### Start / monitor / stop
+
+```bash
+sudo systemctl start ai-scalper-live      # first launch
+sudo systemctl enable ai-scalper-live     # restart on boot
+tail -f /tmp/ai-scalper-live.log | grep -E 'calendar|rotator|opened|exit'
+
+# quick PnL view (separate ledger via DB 1)
+redis-cli -n 1 LRANGE ai-scalper:trader:positions:closed 0 -1 \
+  | jq -s '{trades:length, wins:(map(select(.realizedPnlUsd>0))|length), net:(map(.realizedPnlUsd)|add)}'
+
+# emergency stop (does NOT close open positions — see below)
+sudo systemctl stop ai-scalper-live
+```
+
+### Emergency: close positions manually
+
+`systemctl stop` does NOT flatten positions. In an incident, close via Bybit
+UI's "Close All" button (fastest + most reliable). API alternative:
+```bash
+sudo -u assistant env $(grep -v '^#' /etc/ai-scalper/live.env | xargs) \
+  bun -e 'import("@ai-scalper/bybit-client").then(({createBybitClient})=>createBybitClient().getPosition({category:"linear",symbol:"BTCUSDT"})).then(r=>console.log(JSON.stringify(r,null,2)))'
+```
+
+### Comparing paper vs live (the whole point of parallel running)
+
+```bash
+redis-cli -n 0 LRANGE ai-scalper:trader:positions:closed 0 -1 \
+  | jq -s 'map(select(.strategyType=="calendar-spread"))|{n:length,net:(map(.realizedPnlUsd)|add)}'
+redis-cli -n 1 LRANGE ai-scalper:trader:positions:closed 0 -1 \
+  | jq -s '{n:length,net:(map(.realizedPnlUsd)|add)}'
+```
+
+After 1-2 weeks parallel, the live/paper net ratio is the empirical erosion
+of *our* code, not a textbook estimate.
+
 ## Troubleshooting
 
 | Symptom | Check |

@@ -19,6 +19,7 @@ import {
 import type { TraderConfig } from "../config";
 import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type { BybitClient, QueueLike, StrategyEvaluator } from "./types";
+import type { CalendarRotator } from "./calendar-rotator";
 
 export interface StrategyEvaluateProcessorDeps {
   config: TraderConfig;
@@ -28,6 +29,8 @@ export interface StrategyEvaluateProcessorDeps {
   registry: Record<string, StrategyEvaluator>;
   /** The shared trading-agent queue intents are pushed to. */
   intentQueue: QueueLike<TradingAgentJobData>;
+  /** Optional — passed through to evaluators (currently only calendar-spread). */
+  calendarRotator?: CalendarRotator | null;
   log?: (payload: Record<string, unknown>) => void;
   now?: () => number;
 }
@@ -53,7 +56,7 @@ export async function processStrategyEvaluateTick(
 
   let intents: TradingIntent[];
   try {
-    intents = await evaluator({ config, client, tickerSource, now, log });
+    intents = await evaluator({ config, client, tickerSource, now, log, calendarRotator: deps.calendarRotator });
   } catch (err) {
     log({
       ts: observedAt, event: "strategy-evaluate-error", strategy: jobData.strategy,

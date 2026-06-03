@@ -1,0 +1,187 @@
+{
+  "_doc": "LIVE pipeline config — calendar-spread only on $50 wallet. Mirrors paper-pipeline but: paperTrading via env, tighter risk caps, smaller notional. Activated by ai-scalper-live.service via CONFIG_FILE=config.live-pipeline.json.",
+  "tradingProfile": "standard",
+  "strategy": {
+    "type": "pairs-trading",
+    "fastWindow": 5,
+    "slowWindow": 20,
+    "thresholdBps": 4,
+    "stopLossBps": 30,
+    "takeProfitBps": 60,
+    "requireLocalMaConfirmation": true
+  },
+  "entry": {
+    "executionMode": "maker-only-aggressive",
+    "makerOffsetTicks": 1,
+    "makerPollMs": 200,
+    "makerTimeoutMs": 2000
+  },
+  "wallet": {
+    "autoSize": false,
+    "accountType": "UNIFIED",
+    "coin": "USDT",
+    "fraction": 1,
+    "maxOrderUsdCap": 25
+  },
+  "bybit": {
+    "category": "linear",
+    "symbol": "BTCUSDT",
+    "pollMs": 10000,
+    "orderUsd": 25,
+    "leverage": 2,
+    "slippageTolerancePercent": 0.1,
+    "positionMode": "one-way",
+    "feeRoundTripBps": 4
+  },
+  "fundingArb": {
+    "minAbsRateBps": 5,
+    "entryWindowMinutesBefore": 5,
+    "exitDelayMinutesAfter": 2,
+    "maxLeverage": 5,
+    "maxNotionalUsd": 100
+  },
+  "risk": {
+    "maxPositionUsd": 50,
+    "maxDailyLossUsd": 20,
+    "maxSpreadBps": 15,
+    "minTradeIntervalMs": 60000,
+    "maxFundingRateBps": 50
+  },
+  "scanner": {
+    "refreshMs": 60000,
+    "minSetupScore": 45,
+    "minSetupNetEdgeBps": 15,
+    "candidateSymbols": [],
+    "minOpenInterestUsd": 0,
+    "minListingAgeDays": 0
+  },
+  "tickerFailure": {
+    "threshold": 3,
+    "cooldownTicks": 20
+  },
+  "aggressive": {
+    "allowedSymbols": [],
+    "requireScanCandidate": false,
+    "scanCandidatesPath": "apps/trader/data/backtest-candidates.json",
+    "scanLatestPath": "apps/trader/data/scan-latest.json",
+    "scanMaxAgeMinutes": 30,
+    "maxLeverage": 50,
+    "maxFundingRateBps": 8,
+    "maxLossPerTradeUsd": 8,
+    "minEstimatedLiqBufferBps": 80
+  },
+  "exceptional": {
+    "enabled": false,
+    "allowedSymbols": [],
+    "leverage": 100,
+    "maxSpreadBps": 0.5,
+    "maxFundingRateBps": 2,
+    "minHourlyMoveBps": 100,
+    "minMinuteRangeBps": 20,
+    "minNetEdgeBps": 10
+  },
+  "exitPolicy": {
+    "mode": "logical",
+    "safetyDelayMs": 60000,
+    "safetyStopBps": 300
+  },
+  "meta": {
+    "enabled": false,
+    "warmupMinTrades": 5,
+    "pnlWindowSize": 50,
+    "includeAggressiveVariants": false,
+    "halfLifeDays": 0
+  },
+  "runtime": {
+    "artifactFlushTicks": 5,
+    "statePersistenceEnabled": true,
+    "useWebSocket": true,
+    "usePipeline": true,
+    "pipelineExecutionMode": "maker-with-timeout"
+  },
+  "trailingStop": {
+    "enabled": false,
+    "activationBps": 30,
+    "trailBps": 15
+  },
+  "reconcile": {
+    "intervalTicks": 30,
+    "setTradingStopRetryMax": 3,
+    "setTradingStopRetryDelayMs": 500
+  },
+  "drawdown": {
+    "velocityWindowMs": 3600000,
+    "velocityMaxUsd": 20,
+    "maxConsecutiveLosses": 3
+  },
+  "confidenceSizing": {
+    "enabled": false,
+    "minMultiplier": 0.5,
+    "maxMultiplier": 2.0
+  },
+  "alerts": {
+    "webhookUrl": ""
+  },
+  "scanGateAutoTune": {
+    "enabled": false,
+    "percentile": 75,
+    "fallbackBps": 15
+  },
+  "basisArb": {
+    "entryThresholdBps": 8,
+    "exitThresholdBps": 2,
+    "maxNotionalUsd": 100,
+    "maxHoldMinutes": 240,
+    "leverage": 10,
+    "spreadDivergenceStopBps": 30
+  },
+  "longerTf": {
+    "klineInterval": "15",
+    "klineRefreshSec": 60,
+    "fastWindow": 6,
+    "slowWindow": 20,
+    "thresholdBps": 20,
+    "stopLossBps": 50,
+    "takeProfitBps": 150
+  },
+  "bollingerAdx": {
+    "bbPeriod": 20,
+    "bbStdDev": 2,
+    "adxPeriod": 14,
+    "adxRangingThreshold": 20,
+    "adxTrendingThreshold": 25,
+    "stopLossBps": 80,
+    "takeProfitBps": 150,
+    "klineInterval": "15",
+    "klineRefreshSec": 60
+  },
+  "calendarSpread": {
+    "_doc": "Live calendar-spread on $50 wallet. maxNotionalUsdPerLeg=100 will round down to Bybit minOrderQty (0.001 BTC ~= $67/leg). Leva 10 → ~$6.7 margin per leg = ~$13.4 combined ~= 27% wallet utilization. Dated symbol auto-rotated by calendar-rotator (config value is fallback only).",
+    "perpSymbol": "BTCUSDT",
+    "datedSymbol": "BTCUSDT-26JUN26",
+    "datedDeliveryAt": 1782460800000,
+    "entryThresholdBps": 30,
+    "exitThresholdBps": 5,
+    "preSettlementCloseHours": 24,
+    "maxNotionalUsdPerLeg": 100,
+    "pollSec": 60,
+    "leverage": 10,
+    "spreadDivergenceStopBps": 30
+  },
+  "advisor": {
+    "enabled": false,
+    "intervalMinutes": 30,
+    "model": "claude-haiku-4-5-20251001"
+  },
+  "pairs": {
+    "leg1Symbol": "BTCUSDT",
+    "leg2Symbol": "ETHUSDT",
+    "windowSize": 200,
+    "entryZ": 2.0,
+    "exitZ": 0.3,
+    "maxHoldMinutes": 480,
+    "maxNotionalUsdPerLeg": 100,
+    "klineInterval": "5",
+    "klineRefreshSec": 30
+  }
+}

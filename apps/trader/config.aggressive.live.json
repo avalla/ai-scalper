@@ -1,0 +1,19 @@
+{
+  "_comment": "LIVE aggressive subsystem config — DISABLED. Live phase 1 runs ONLY calendar-spread. liquidation-hunter + pump-scanner stay on paper until they have a comparable statistical track record.",
+  "enabled": false,
+  "symbol": "BTCUSDT",
+  "startingEquityUsd": 100,
+  "maxCapitalUsd": 200,
+  "dailyLossCapFraction": 0.5,
+  "maxTradesPerDay": 10,
+  "evaluateTickMs": 5000,
+  "manageTickMs": 2000,
+  "liquidationLookbackMs": 1800000,
+  "mapBandBps": 20,
+  "mapMinMagnetSizeUsd": 50000,
+  "maxHoldSec": 3600,
+  "tierLadder": [
+    { "minEquity": 0, "maxEquity": 200, "leverage": 25, "maxNotionalPerTrade": 50, "strategy": "liquidation-hunter", "hardStopFraction": 0.02, "takeProfitFraction": 0.04 }
+  ],
+  "pumpScanner": { "enabled": false }
+}

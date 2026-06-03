@@ -31,6 +31,7 @@ import {
 } from "@ai-scalper/trading-core";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { step, type StepContext } from "./step";
+import { createCalendarRotator, type CalendarRotator } from "../pipeline/calendar-rotator";
 import { defaultVariantPool, type Variant } from "../meta/variant-pool";
 import {
   emptyAllocatorState,
@@ -2556,12 +2557,21 @@ async function runCalendarSpreadTick(params: {
   positionLedger: ReturnType<typeof createPositionLedger>;
   stateRef: MutableRef<TraderState>;
   openPositionSymbolRef: MutableRef<string | null>;
+  rotator?: CalendarRotator | null;
   toPersistedTraderSnapshot: (p: { openPositionSymbol: string | null; state: TraderState }) => PersistedTraderSnapshot;
 }): Promise<{ shouldContinueLoop: boolean }> {
   const { config, client, stateRef, openPositionSymbolRef, calendarPositionRef } = params;
   const perpSymbol = config.calendarPerpSymbol;
-  const datedSymbol = config.calendarDatedSymbol;
-  const datedDeliveryAt = config.calendarDatedDeliveryAt;
+  // Rotation hazard: this tick uses datedSymbol for BOTH open-decision and
+  // exit-execution. If a position is open and the rotator picks a different
+  // contract, we'd fetch the wrong ticker → wrong exit price → close the wrong
+  // symbol on the exchange. Avoid the trap: only consult the rotator when no
+  // position is open. Between trades, the rotator transparently advances us to
+  // the next quarterly without operator action.
+  const positionOpen = params.calendarPositionRef.get() !== null;
+  const rotated = (params.rotator && !positionOpen) ? await params.rotator.getCurrent() : null;
+  const datedSymbol = rotated?.symbol ?? config.calendarDatedSymbol;
+  const datedDeliveryAt = rotated?.deliveryAt ?? config.calendarDatedDeliveryAt;
 
   if (!datedSymbol || datedSymbol.trim() === "" || datedDeliveryAt <= 0) {
     console.warn(JSON.stringify({
@@ -3732,6 +3742,13 @@ export async function runTrader(config: TraderConfig): Promise<void> {
     scanConfig.scanExcludedSymbols = config.scanExcludedSymbols;
   }
   const instrumentCache = new Map<string, InstrumentInfo>();
+  // Auto-rotates the dated leg as quarterlies settle. Active only for
+  // calendar-spread; cheap REST call hourly, no-op otherwise.
+  let calendarRotator: CalendarRotator | null = null;
+  if (config.strategyType === "calendar-spread") {
+    const baseCoin = config.calendarPerpSymbol.replace(/USDT$|USDC$/, "") || "BTC";
+    calendarRotator = createCalendarRotator(client, { baseCoin, refreshMs: 60 * 60_000 });
+  }
   const configuredLiveLeverageBySymbol = new Map<string, number>();
   const priceHistoryBySymbol = new Map<string, number[]>();
   const symbolAvailability = new Map<string, SymbolAvailabilityState>();
@@ -4087,6 +4104,7 @@ export async function runTrader(config: TraderConfig): Promise<void> {
             get: () => openPositionSymbol,
             set: (v) => { openPositionSymbol = v; },
           },
+          rotator: calendarRotator,
           toPersistedTraderSnapshot: (p) => toPersistedTraderSnapshot(p),
         });
         ticks += 1;

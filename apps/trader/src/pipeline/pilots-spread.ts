@@ -27,13 +27,18 @@ export const calendarSpreadEvaluator: StrategyEvaluator = async (ctx) => {
   const { config, client, tickerSource, now, log } = ctx;
   const observedAt = new Date(now).toISOString();
 
-  if (!config.calendarDatedSymbol || config.calendarDatedDeliveryAt <= 0) return [];
+  // Auto-rotation: pick the nearest valid quarterly via the rotator; fall back
+  // to static config when the rotator is absent or hasn't resolved a pick yet.
+  const rotated = ctx.calendarRotator ? await ctx.calendarRotator.getCurrent() : null;
+  const datedSymbol = rotated?.symbol ?? config.calendarDatedSymbol;
+  const datedDeliveryAt = rotated?.deliveryAt ?? config.calendarDatedDeliveryAt;
+  if (!datedSymbol || datedDeliveryAt <= 0) return [];
 
   let perpPrice = 0; let datedPrice = 0;
   try {
     const [perpT, datedT] = await Promise.all([
       tickerSource.getTicker(config.calendarPerpSymbol, { category: "linear" }),
-      tickerSource.getTicker(config.calendarDatedSymbol, { category: "linear" }),
+      tickerSource.getTicker(datedSymbol, { category: "linear" }),
     ]);
     perpPrice = Number(perpT.lastPrice);
     datedPrice = Number(datedT.lastPrice);
@@ -44,7 +49,7 @@ export const calendarSpreadEvaluator: StrategyEvaluator = async (ctx) => {
   if (!Number.isFinite(perpPrice) || perpPrice <= 0 || !Number.isFinite(datedPrice) || datedPrice <= 0) return [];
 
   const decision = calendarDecide({
-    perpPrice, datedPrice, datedDeliveryAt: config.calendarDatedDeliveryAt, now, position: null,
+    perpPrice, datedPrice, datedDeliveryAt, now, position: null,
     config: {
       entryThresholdBps: config.calendarEntryThresholdBps,
       exitThresholdBps: config.calendarExitThresholdBps,
@@ -56,7 +61,7 @@ export const calendarSpreadEvaluator: StrategyEvaluator = async (ctx) => {
   let perpInstr;
   try { [perpInstr] = await Promise.all([
     client.getInstrumentInfo({ category: "linear", symbol: config.calendarPerpSymbol }),
-    client.getInstrumentInfo({ category: "linear", symbol: config.calendarDatedSymbol }),
+    client.getInstrumentInfo({ category: "linear", symbol: datedSymbol }),
   ]); } catch { return []; }
 
   const notionalPerLegUsd = config.calendarMaxNotionalUsdPerLeg;
@@ -69,14 +74,14 @@ export const calendarSpreadEvaluator: StrategyEvaluator = async (ctx) => {
     symbol: config.calendarPerpSymbol,
     legs: [
       { symbol: config.calendarPerpSymbol, side: decision.perpSide, category: "linear", qty: q.qty, qtyStr: q.qtyStr, refPrice: perpPrice },
-      { symbol: config.calendarDatedSymbol, side: decision.datedSide, category: "linear", qty: q.qty, qtyStr: q.qtyStr, refPrice: datedPrice },
+      { symbol: datedSymbol, side: decision.datedSide, category: "linear", qty: q.qty, qtyStr: q.qtyStr, refPrice: datedPrice },
     ],
     notionalUsd: notionalPerLegUsd, leverage,
     reason: decision.reason, evaluatedAt: observedAt,
     managePayload: {
       qtyStep: perpInstr.lotSizeFilter.qtyStep, minOrderQty: perpInstr.lotSizeFilter.minOrderQty,
       entrySpreadBps: computeCalendarSpreadBps(perpPrice, datedPrice),
-      datedDeliveryAt: config.calendarDatedDeliveryAt,
+      datedDeliveryAt,
     },
   };
   return [intent];
