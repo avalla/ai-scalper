@@ -166,7 +166,8 @@
     "maxNotionalUsdPerLeg": 100,
     "pollSec": 60,
     "leverage": 10,
-    "spreadDivergenceStopBps": 30
+    "spreadDivergenceStopBps": 30,
+    "hardwareStopBpsPerLeg": 0
   },
   "advisor": {
     "enabled": false,

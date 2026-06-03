@@ -20,6 +20,7 @@ import { computeQtyFromNotional, makePositionId } from "../strategies/shared/tra
 import type { ExecutionAdapter, ExecutionResult, StrategyEvaluator } from "./types";
 import { placeOrderWithMakerPreference, type OrderCategory, type OrderSide } from "./maker-execution";
 import { ensureCrossMargin } from "./cross-margin";
+import { applyHardwareStops } from "./hardware-stop";
 
 // ── calendar-spread (two-leg: perp + dated, both linear) ───────────────────
 
@@ -135,6 +136,29 @@ export const calendarSpreadAdapter: ExecutionAdapter = async (intent, ctx): Prom
       }
       await alerter.send(`calendar-spread dated open failed (compensated)`).catch(() => {});
       return { status: "compensated", reason: "dated-open-failed" };
+    }
+
+    // Backup safety net — exchange-side stops on each leg. WIDE (≥500 bps
+    // recommended) to avoid legging-out on normal directional moves. Failures
+    // are best-effort: we proceed even if the API call rejects, because the
+    // logical spreadDivergenceStopBps guard remains active either way.
+    if (config.calendarHardwareStopBpsPerLeg > 0) {
+      try {
+        const [perpInstr, datedInstr] = await Promise.all([
+          client.getInstrumentInfo({ category: "linear", symbol: perpLeg.symbol }),
+          client.getInstrumentInfo({ category: "linear", symbol: datedLeg.symbol }),
+        ]);
+        await applyHardwareStops({
+          client, widthBps: config.calendarHardwareStopBpsPerLeg,
+          log: (msg) => log({ ts: observedAt, ...msg }),
+          legs: [
+            { symbol: perpLeg.symbol, side: perpLeg.side, entryPrice: perpLeg.refPrice, tickSize: perpInstr.priceFilter.tickSize, category: "linear" },
+            { symbol: datedLeg.symbol, side: datedLeg.side, entryPrice: datedLeg.refPrice, tickSize: datedInstr.priceFilter.tickSize, category: "linear" },
+          ],
+        });
+      } catch (err) {
+        log({ ts: observedAt, event: "hardware-stop-instrument-fetch-failed", err: err instanceof Error ? err.message : String(err) });
+      }
     }
   }
 

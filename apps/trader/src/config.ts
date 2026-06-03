@@ -230,6 +230,14 @@ export interface TraderConfig {
    * MUST be set when calendarLeverage > 1 (otherwise leveraged blow-up risk).
    */
   calendarSpreadDivergenceStopBps: number;
+  /**
+   * Exchange-side stop-loss width per leg (bps from entry). 0 = disabled.
+   * Backup safety net for the bot-crash scenario. WIDE values recommended
+   * (≥500 at leverage 10) because tight stops on a hedged spread can fire on
+   * normal directional moves and "leg out" the position (leaves naked leg).
+   * Default 0 — operator opts-in after considering the leg-out trade-off.
+   */
+  calendarHardwareStopBpsPerLeg: number;
   // LLM advisor
   advisorEnabled: boolean;
   advisorIntervalMinutes: number;
@@ -472,6 +480,7 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     calendarPollSec: (calendarSpread.pollSec as number) ?? 60,
     calendarLeverage: clampLeverage(calendarSpread.leverage as number | undefined, "calendarSpread.leverage"),
     calendarSpreadDivergenceStopBps: (calendarSpread.spreadDivergenceStopBps as number) ?? 0,
+    calendarHardwareStopBpsPerLeg: (calendarSpread.hardwareStopBpsPerLeg as number) ?? 0,
     advisorEnabled: (advisor.enabled as boolean) ?? false,
     advisorIntervalMinutes: (advisor.intervalMinutes as number) ?? 30,
     advisorModel: (advisor.model as string) ?? "claude-haiku-4-5-20251001",

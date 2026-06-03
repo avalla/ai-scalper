@@ -197,6 +197,41 @@ Same margin → linear scale of both gross and (assumption-based) net. Real risk
 also scales linearly — a 100bps adverse divergence at 10x = $29 of loss (vs ~$3
 at 1x). That's why `spreadDivergenceStopBps` is mandatory at higher leverage.
 
+### Hardware-stop backup (opt-in)
+
+Each calendar/basis position can optionally receive an exchange-side
+stop-loss on **each leg** via `setTradingStop`. This is a backup safety net
+for catastrophic events: if the bot crashes or loses connectivity, Bybit will
+close the leg without our intervention. **The primary protection remains
+`spreadDivergenceStopBps`** — this is the secondary layer only.
+
+```jsonc
+"calendarSpread": {
+  ...
+  "hardwareStopBpsPerLeg": 0  // 0 = disabled (default). Recommended ≥500 if enabled.
+}
+```
+
+**WHY DEFAULT OFF / WHY WIDE**: a calendar spread is a hedged position. Both
+legs move together when the underlying moves. A *tight* hardware stop (e.g.
+100 bps) will fire on a normal directional move of BTC while the spread
+itself is fine — closing one leg and leaving the other naked at 10x. That
+"legged-out" position is materially worse than the original crash-risk it
+was meant to mitigate.
+
+Therefore, when enabled, set the width WIDE enough that the stop only fires
+on tail events:
+- **≥500 bps (5%)** at leverage 10x is the floor I'd recommend.
+- At this width, the stop triggers only when BTC moves >5% intra-position,
+  which is rare and effectively a crash/illiquid-market signal.
+
+The width is per-leg from each entry price, rounded to tick. Setting failures
+are logged + best-effort — they never block the trade. To monitor:
+
+```bash
+grep hardware-stop /tmp/ai-scalper-live.log | head
+```
+
 ### Account-side prerequisite (Bybit UI)
 
 Set the Bybit unified account to **Cross Margin**. This is not done by code —

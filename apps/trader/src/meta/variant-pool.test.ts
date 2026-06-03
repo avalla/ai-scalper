@@ -117,7 +117,7 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     useWebSocket: false,
     usePipeline: false,
     pipelineExecutionMode: "taker" as const,
-    calendarLeverage: 1, calendarSpreadDivergenceStopBps: 0,
+    calendarLeverage: 1, calendarSpreadDivergenceStopBps: 0, calendarHardwareStopBpsPerLeg: 0,
     basisArbLeverage: 1, basisArbSpreadDivergenceStopBps: 0,
     basisArbEntryThresholdBps: 8,
     basisArbExitThresholdBps: 2,
