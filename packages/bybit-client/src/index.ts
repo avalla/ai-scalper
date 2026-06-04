@@ -445,7 +445,13 @@ export function createBybitClient(options: BybitClientOptions = {}) {
       });
       // 110026 = already in the requested margin mode (idempotent success).
       // 110043 = leverage already set to this value (same call carries leverage).
+      // 3400045 / "unified account is forbidden" = UTA accounts: margin mode
+      //   is account-level on UTA, not per-symbol. The setting is already
+      //   global, so per-symbol switch is a no-op success.
       if (data.retCode === 110026 || data.retCode === 110043) return { alreadySet: true };
+      if (data.retCode === 3400045 || /unified account is forbidden/i.test(data.retMsg ?? "")) {
+        return { alreadySet: true };
+      }
       if (data.retCode !== 0) {
         throw new Error(`Bybit switch margin mode failed: ${data.retMsg}`);
       }

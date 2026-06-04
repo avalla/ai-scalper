@@ -10,6 +10,7 @@ import {
   type TraderSessionJobData,
 } from "@ai-scalper/queueing";
 import { createRedisConnection } from "./redis";
+import { startBoardServer, type BoardServerHandle } from "./board";
 import { summarizeTraderStdout } from "./trader-log-summary";
 import { readTraderConfig } from "../../trader/src/config";
 import { startLlmManagedWorkerStack, type LlmManagedWorkerStack } from "./llm-managed-workers";
@@ -339,6 +340,7 @@ let liquidationCascadeStack: LiquidationCascadeWorkerStack | null = null;
 let pipelineStack: PipelineWorkerStack | null = null;
 let aggressiveStack: AggressiveWorkerStack | null = null;
 let pumpScannerStack: PumpScannerWorkerStack | null = null;
+let boardHandle: BoardServerHandle | null = null;
 /** Optional ws-feeder subprocess (spawned by main() when USE_WEBSOCKET=true). */
 let wsFeederProcess: ReturnType<typeof Bun.spawn> | null = null;
 
@@ -520,6 +522,19 @@ async function main(): Promise<void> {
     }));
   }
 
+  // Bull Board admin UI + /health probe. In-process: re-uses the worker's
+  // existing Redis connection. Port collisions across paper/live are avoided
+  // by setting BULL_BOARD_PORT in the systemd env (paper:3010, live:3011).
+  try {
+    boardHandle = await startBoardServer({ connection });
+  } catch (err) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      event: "bull-board-bootstrap-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+
   console.log(JSON.stringify({
     event: "workers-ready",
     queues: activeQueues,
@@ -616,6 +631,10 @@ async function shutdown(signal: string): Promise<void> {
     if (wsFeederProcess && !wsFeederProcess.killed) {
       try { wsFeederProcess.kill("SIGTERM"); } catch { /* ignore */ }
       console.log(JSON.stringify({ event: "shutdown-progress", step: "ws-feeder-killed" }));
+    }
+    if (boardHandle) {
+      await boardHandle.close();
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "bull-board-closed" }));
     }
     await connection.quit();
     console.log(JSON.stringify({ event: "shutdown-complete" }));

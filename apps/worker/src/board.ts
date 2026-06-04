@@ -11,22 +11,16 @@ import { resolve } from "node:path";
 
 const WS_HEARTBEAT_STALE_MS = 30_000;
 
-const boardPort = Number(process.env.BULL_BOARD_PORT || "3010");
-const boardBasePath = process.env.BULL_BOARD_BASE_PATH || "/admin/queues";
-const connection = createRedisConnection();
+const DEFAULT_BOARD_PORT = Number(process.env.BULL_BOARD_PORT || "3010");
+const DEFAULT_BOARD_BASE_PATH = process.env.BULL_BOARD_BASE_PATH || "/admin/queues";
 
-function buildQueues() {
+function buildQueues(connection: ReturnType<typeof createRedisConnection>) {
   return [
     new Queue(QUEUE_NAMES.marketScan, { connection }),
     new Queue(QUEUE_NAMES.paperSession, { connection }),
     new Queue(QUEUE_NAMES.liveSession, { connection }),
-    // Phase 1 PoC: llm-managed BullMQ migration. Always registered so the
-    // operator can see live trade-management jobs even when no positions
-    // are open (queues are auto-created the first time we read them).
     new Queue(QUEUE_NAMES.llmManagedOpenDecision, { connection }),
     new Queue(QUEUE_NAMES.llmManagedTradeManagement, { connection }),
-    // Phase 2 — per-strategy queues. Read-only so the operator can monitor
-    // live trades for any strategy via Bull Board.
     new Queue(QUEUE_NAMES.fundingArbOpenDecision, { connection }),
     new Queue(QUEUE_NAMES.fundingArbTradeManagement, { connection }),
     new Queue(QUEUE_NAMES.longerTfOpenDecision, { connection }),
@@ -46,12 +40,35 @@ function buildQueues() {
   ];
 }
 
-async function main(): Promise<void> {
+export interface BoardServerOpts {
+  /** Defaults to env BULL_BOARD_PORT or 3010. */
+  port?: number;
+  /** Defaults to env BULL_BOARD_BASE_PATH or "/admin/queues". */
+  basePath?: string;
+  /** Re-use the worker's existing connection in-process; standalone mode creates its own. */
+  connection?: ReturnType<typeof createRedisConnection>;
+}
+
+export interface BoardServerHandle {
+  close(): Promise<void>;
+}
+
+/**
+ * Start the Bull Board admin UI + /health probe. Can be invoked in-process by
+ * the worker bootstrap (re-using its Redis connection) OR standalone via
+ * `bun src/board.ts` (creates its own connection).
+ */
+export async function startBoardServer(opts: BoardServerOpts = {}): Promise<BoardServerHandle> {
+  const port = opts.port ?? DEFAULT_BOARD_PORT;
+  const basePath = opts.basePath ?? DEFAULT_BOARD_BASE_PATH;
+  const connection = opts.connection ?? createRedisConnection();
+  const ownsConnection = opts.connection === undefined;
+
   const app = express();
   const serverAdapter = new ExpressAdapter();
-  serverAdapter.setBasePath(boardBasePath);
+  serverAdapter.setBasePath(basePath);
 
-  const queues = buildQueues();
+  const queues = buildQueues(connection);
   createBullBoard({
     queues: queues.map((queue) => new BullMQAdapter(queue, { readOnlyMode: true })),
     serverAdapter,
@@ -63,14 +80,11 @@ async function main(): Promise<void> {
     },
   });
 
-  app.use(boardBasePath, serverAdapter.getRouter());
+  app.use(basePath, serverAdapter.getRouter());
 
-  // /health — returns JSON with HTTP 200 if healthy, 503 if any check fails.
-  // Probes Redis + (optionally) Bybit + queue depth + kline freshness.
   const scanLatestPath = process.env.SCAN_LATEST_PATH
     ?? resolve(process.cwd(), "../trader/data/scan-latest.json");
   app.get("/health", async (_req, res) => {
-    const queueRefs = queues;
     let heartbeat: WsHeartbeat | null = null;
     try {
       heartbeat = await readWsHeartbeat(connection as unknown as Parameters<typeof readWsHeartbeat>[0]);
@@ -86,7 +100,6 @@ async function main(): Promise<void> {
           reconnectsLastHour: () => heartbeat!.reconnects,
         }
       : {
-          // Missing or stale heartbeat → force ws.ok=false.
           isConnected: () => false,
           lastMessageAt: () => null,
           reconnectsLastHour: () => 0,
@@ -95,7 +108,7 @@ async function main(): Promise<void> {
       redis: connection as unknown as { ping(): Promise<string> },
       queueLengths: async () => {
         const out: Record<string, { waiting?: number; failed?: number }> = {};
-        for (const q of queueRefs) {
+        for (const q of queues) {
           const [waiting, failed] = await Promise.all([
             q.getWaitingCount().catch(() => 0),
             q.getFailedCount().catch(() => 0),
@@ -110,14 +123,26 @@ async function main(): Promise<void> {
     res.status(result.ok ? 200 : 503).json(result);
   });
 
-  app.listen(boardPort, () => {
+  const server = app.listen(port, () => {
     console.log(JSON.stringify({
-      basePath: boardBasePath,
-      port: boardPort,
-      status: "ready",
-      url: `http://localhost:${boardPort}${boardBasePath}`,
-    }, null, 2));
+      event: "bull-board-ready",
+      basePath,
+      port,
+      url: `http://localhost:${port}${basePath}`,
+    }));
   });
+
+  return {
+    async close() {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      if (ownsConnection) await connection.quit().catch(() => {});
+    },
+  };
 }
 
-await main();
+// Standalone mode: when this file is the entry point (`bun src/board.ts`),
+// auto-start with the env-driven defaults. When imported from index.ts, the
+// caller is responsible for invoking startBoardServer().
+if (import.meta.main) {
+  await startBoardServer();
+}
