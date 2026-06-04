@@ -232,6 +232,28 @@ are logged + best-effort — they never block the trade. To monitor:
 grep hardware-stop /tmp/ai-scalper-live.log | head
 ```
 
+### Pin-risk telemetry (passive)
+
+When a calendar-spread position closes at a loss within `PIN_RISK_WINDOW_HOURS`
+(48h, source of truth in `calendar-spread-manage-processor.ts`) of the dated
+contract's settlement, the close-tick emits a `pin-risk-loss-suspect` log
+event in addition to the normal `calendar-spread-close`. No behavioral
+change — just visibility.
+
+Trigger for hardening `preSettlementCloseHours` and rotator `minHoursAhead`:
+- **0-1 pin-risk-suspect events / month**: noise; current 24h buffer is fine.
+- **2+ in the same contract OR a clustering pattern across contracts**:
+  evidence that the last day or two of a contract carries adverse
+  microstructure for us → bump the buffer.
+
+Inspect:
+```bash
+sudo grep pin-risk-loss-suspect /tmp/ai-scalper-paper.log /tmp/ai-scalper-live.log
+# count per contract:
+sudo grep pin-risk-loss-suspect /tmp/ai-scalper-*.log \
+  | jq -s 'group_by(.datedSymbol) | map({sym:.[0].datedSymbol, n:length})'
+```
+
 ### Account-side prerequisite (Bybit UI)
 
 Set the Bybit unified account to **Cross Margin**. This is not done by code —

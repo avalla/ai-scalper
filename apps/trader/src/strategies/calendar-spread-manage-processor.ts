@@ -192,8 +192,30 @@ export async function processCalendarSpreadManageTick(
     positionId: jobData.positionId,
     perpPnl, datedPnl, grossPnl, feeUsd, netPnl, reason: decision.reason, exitSpreadBps,
   });
+
+  // Pin-risk telemetry: surface losses that close within 48h of settlement.
+  // We need to know if (a) liquidity dry-up near settlement is causing adverse
+  // exits, vs (b) losses are independent of contract age (general volatility).
+  // Emit only — no behavioral change. Tail with: grep pin-risk-loss-suspect.
+  const hoursToSettlementAtClose = (jobData.datedDeliveryAt - now) / 3_600_000;
+  if (netPnl < 0 && hoursToSettlementAtClose < PIN_RISK_WINDOW_HOURS) {
+    log({
+      ts: observedAt, event: "pin-risk-loss-suspect",
+      positionId: jobData.positionId,
+      datedSymbol: jobData.datedSymbol,
+      hoursToSettlement: Number(hoursToSettlementAtClose.toFixed(2)),
+      netPnl: Number(netPnl.toFixed(4)),
+      reason: decision.reason,
+      entrySpreadBps: jobData.entrySpreadBps,
+      exitSpreadBps,
+    });
+  }
+
   return { status: "complete", reason: decision.reason };
 }
+
+/** Window in which a loss is flagged as potentially driven by pin-risk. */
+export const PIN_RISK_WINDOW_HOURS = 48;
 
 function buildLedger(
   jobData: CalendarSpreadManageJobData,

@@ -185,6 +185,70 @@ describe("processCalendarSpreadManageTick", () => {
     expect(entries).toHaveLength(1);
   });
 
+  test("pin-risk-loss-suspect fires when loss closes within 48h of settlement", async () => {
+    // dated delivers 24h from now; divergence-stop forces a loss
+    const NEAR_DELIVERY = Date.now() + 24 * 3_600_000;
+    const events: any[] = [];
+    const deps: CalendarSpreadManageProcessorDeps = {
+      config: makeConfig({ paperTrading: true, calendarSpreadDivergenceStopBps: 50 }),
+      client: {
+        async getPosition() { return { size: "0.001" }; },
+        async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "50800" }; },
+        async createOrder() {},
+      } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50800 }),
+      alerter: { async send() {} } as any,
+      sharedState: makeShared(),
+      positionLedger: { async appendClosedPosition() {} },
+      log: (p: any) => events.push(p), now: () => Date.now(),
+    };
+    await processCalendarSpreadManageTick(makeJob({ entrySpreadBps: 60, datedDeliveryAt: NEAR_DELIVERY }), deps);
+    const flag = events.find((e) => e.event === "pin-risk-loss-suspect");
+    expect(flag).toBeDefined();
+    expect(flag.hoursToSettlement).toBeLessThan(48);
+    expect(flag.netPnl).toBeLessThan(0);
+  });
+
+  test("pin-risk-loss-suspect does NOT fire when settlement is far (>48h)", async () => {
+    const FAR_DELIVERY = Date.now() + 30 * 24 * 3_600_000;
+    const events: any[] = [];
+    const deps: CalendarSpreadManageProcessorDeps = {
+      config: makeConfig({ paperTrading: true, calendarSpreadDivergenceStopBps: 50 }),
+      client: {
+        async getPosition() { return { size: "0.001" }; },
+        async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "50800" }; },
+        async createOrder() {},
+      } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50800 }),
+      alerter: { async send() {} } as any,
+      sharedState: makeShared(),
+      positionLedger: { async appendClosedPosition() {} },
+      log: (p: any) => events.push(p), now: () => Date.now(),
+    };
+    await processCalendarSpreadManageTick(makeJob({ entrySpreadBps: 60, datedDeliveryAt: FAR_DELIVERY }), deps);
+    expect(events.find((e) => e.event === "pin-risk-loss-suspect")).toBeUndefined();
+  });
+
+  test("pin-risk-loss-suspect does NOT fire on a WIN close near settlement", async () => {
+    const NEAR_DELIVERY = Date.now() + 24 * 3_600_000;
+    const events: any[] = [];
+    const deps: CalendarSpreadManageProcessorDeps = {
+      config: makeConfig({ paperTrading: true }),
+      client: {
+        async getPosition() { return { size: "0.001" }; },
+        async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "50010" }; },
+        async createOrder() {},
+      } as any,
+      tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50010 }),
+      alerter: { async send() {} } as any,
+      sharedState: makeShared(),
+      positionLedger: { async appendClosedPosition() {} },
+      log: (p: any) => events.push(p), now: () => Date.now(),
+    };
+    await processCalendarSpreadManageTick(makeJob({ entrySpreadBps: 60, datedDeliveryAt: NEAR_DELIVERY }), deps);
+    expect(events.find((e) => e.event === "pin-risk-loss-suspect")).toBeUndefined();
+  });
+
   test("external close detected when either leg vanishes", async () => {
     const entries: ClosedPositionLedgerEntry[] = [];
     const deps: CalendarSpreadManageProcessorDeps = {
