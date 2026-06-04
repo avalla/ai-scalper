@@ -471,6 +471,65 @@ redis-cli -n 1 LRANGE ai-scalper:trader:positions:closed 0 -1 \
 After 1-2 weeks parallel, the live/paper net ratio is the empirical erosion
 of *our* code, not a textbook estimate.
 
+## Paper → live promotion check
+
+Automated scorer that evaluates each paper-trading strategy against the
+"safe to promote" bar. Run on-demand or via cron / systemd timer.
+
+```bash
+# on-demand
+bun run apps/trader/src/scripts/strategy-promotion.ts
+
+# against a specific Redis DB (e.g. paper=DB 0 even when live is on DB 1)
+PROMOTION_REDIS_URL=redis://127.0.0.1:6379/0 \
+  bun run apps/trader/src/scripts/strategy-promotion.ts
+```
+
+### Criteria
+
+| # | Criterion | Default | Env override |
+|---|---|---|---|
+| 1 | ≥ N closed trades | `30` | `PROMOTION_MIN_TRADES` |
+| 2 | Win-rate ≥ X% | `70%` | `PROMOTION_MIN_WIN_RATE` (decimal) |
+| 3 | Net cumulato ≥ Y × cumulative fees | `2×` | `PROMOTION_MIN_NET_OVER_FEES` |
+| 4 | At least 1 divergence-stop survived (cumulative net positive after stop) | always on | — |
+| 5 | **0 operational errors in window** | **operator confirms manually** | — |
+
+Defaults tuned to what calendar-spread actually achieved (74 trades, 92% win,
+2.5× fee multiple, divergence-stop survived 60+ times). Tighten the
+multipliers via env when scaling up capital — at $50 wallet the lower bar is
+appropriate; at $500+ the operator may want `PROMOTION_MIN_NET_OVER_FEES=3`.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | nothing actionable — keep observing |
+| `1` | ≥1 strategy is `PROMOTE` → review + manually update `PIPELINE_STRATEGIES` in live env if you agree |
+| `2` | ≥1 strategy is `DISABLE` (net-negative with significant sample) → consider removing from paper too |
+
+### Cron (weekly summary, posts to webhook if set)
+
+```cron
+# every Monday 09:00 — write to a log; non-zero exit alerts via email/webhook
+0 9 * * 1 cd /home/assistant/projects/ai-scalper && bun run apps/trader/src/scripts/strategy-promotion.ts >> /var/log/ai-scalper-promotion.log 2>&1 || echo "promotion check flagged a change" | mail -s "ai-scalper" you@example.com
+```
+
+### Workflow when a strategy passes
+
+1. Re-read the verdict and the trade log for the flagged strategy.
+2. Confirm zero operational errors in the period (manual check of
+   `/tmp/ai-scalper-paper.log`).
+3. If satisfied, edit `/etc/ai-scalper/live.env`:
+   ```
+   PIPELINE_STRATEGIES=calendar-spread,<new-strategy>
+   ```
+4. Re-run `live-preflight.ts` to confirm everything is still valid.
+5. `sudo systemctl restart ai-scalper-live`.
+
+The system does NOT auto-promote — humans-in-the-loop on every capital
+decision, by design.
+
 ## Troubleshooting
 
 | Symptom | Check |
