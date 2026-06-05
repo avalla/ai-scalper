@@ -156,11 +156,11 @@
     "klineRefreshSec": 60
   },
   "calendarSpread": {
-    "_doc": "Live calendar-spread. SEMANTICS WARNING: maxNotionalUsdPerLeg is the PRE-LEVERAGE margin per leg — actual notional placed = maxNotionalUsdPerLeg × leverage. With $52 wallet use 10 (notional $63/leg, IM $12.6 total). With $189 wallet use 40 (notional $376/leg, IM $75 total, 40% wallet util). Dated symbol auto-rotated by calendar-rotator. entryThresholdBps bumped 30→50 on 2026-06-05 after first live cohort showed ~$7 erosion on 10 trades (taker exit fees + slippage vs mark). Entry also forced maker-only (no taker fallback) in pilots-spread.ts.",
+    "_doc": "Live calendar-spread. SEMANTICS WARNING: maxNotionalUsdPerLeg is the PRE-LEVERAGE margin per leg — actual notional placed = maxNotionalUsdPerLeg × leverage. With $52 wallet use 10 (notional $63/leg, IM $12.6 total). With $189 wallet use 40 (notional $376/leg, IM $75 total, 40% wallet util). Dated symbol auto-rotated by calendar-rotator. Threshold history (2026-06-05): 30→50 after first live cohort showed ~$7 erosion; 50→45 to restore some sample (3h with zero trades at 50). Entry maker-only (no taker fallback) in pilots-spread.ts. Dated leg opened first to avoid compensation cost.",
     "perpSymbol": "BTCUSDT",
     "datedSymbol": "BTCUSDT-26JUN26",
     "datedDeliveryAt": 1782460800000,
-    "entryThresholdBps": 50,
+    "entryThresholdBps": 45,
     "exitThresholdBps": 5,
     "preSettlementCloseHours": 24,
     "maxNotionalUsdPerLeg": 40,
