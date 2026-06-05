@@ -156,14 +156,14 @@
     "klineRefreshSec": 60
   },
   "calendarSpread": {
-    "_doc": "Live calendar-spread on $50 wallet. maxNotionalUsdPerLeg=100 will round down to Bybit minOrderQty (0.001 BTC ~= $67/leg). Leva 10 → ~$6.7 margin per leg = ~$13.4 combined ~= 27% wallet utilization. Dated symbol auto-rotated by calendar-rotator (config value is fallback only).",
+    "_doc": "Live calendar-spread on $50 wallet. SEMANTICS WARNING: maxNotionalUsdPerLeg is the PRE-LEVERAGE margin per leg — actual notional placed = maxNotionalUsdPerLeg × leverage. At leva 10 and maxNotionalUsdPerLeg=10 → exposure $100 → qty 0.0016 BTC → floors to minOrderQty 0.001 → real notional ~$63/leg → IM ~$6.3/leg → 2 legs = $12.6 margin (~25% of $52 wallet). Dated symbol auto-rotated by calendar-rotator.",
     "perpSymbol": "BTCUSDT",
     "datedSymbol": "BTCUSDT-26JUN26",
     "datedDeliveryAt": 1782460800000,
     "entryThresholdBps": 30,
     "exitThresholdBps": 5,
     "preSettlementCloseHours": 24,
-    "maxNotionalUsdPerLeg": 100,
+    "maxNotionalUsdPerLeg": 10,
     "pollSec": 60,
     "leverage": 10,
     "spreadDivergenceStopBps": 30,
