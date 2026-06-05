@@ -120,25 +120,28 @@ export const calendarSpreadAdapter: ExecutionAdapter = async (intent, ctx): Prom
         await ensureCrossMargin({ client, category: "linear", symbol: leg.symbol, leverage: intent.leverage, log: (p) => log({ ts: observedAt, ...p }) });
       }
     }
-    try {
-      await placeEntry(perpLeg.symbol, perpLeg.side === "long" ? "Buy" : "Sell", perpLeg.qtyStr, "linear");
-    } catch (err) {
-      log({ ts: observedAt, event: "calendar-spread-perp-open-failed", err: err instanceof Error ? err.message : String(err) });
-      await alerter.send(`calendar-spread perp open failed`).catch(() => {});
-      return { status: "skipped", reason: "perp-open-failed" };
-    }
+    // Open the DATED leg first — it is the illiquid side that fails most often
+    // under maker-only. If it fails, nothing has been opened yet so we can skip
+    // without compensation. Then open the perp (highly liquid, almost always
+    // fills); compensate the dated if that rare case happens.
     try {
       await placeEntry(datedLeg.symbol, datedLeg.side === "long" ? "Buy" : "Sell", datedLeg.qtyStr, "linear");
     } catch (err) {
-      log({ ts: observedAt, event: "calendar-spread-dated-open-failed-compensating", err: err instanceof Error ? err.message : String(err) });
+      log({ ts: observedAt, event: "calendar-spread-dated-open-failed", err: err instanceof Error ? err.message : String(err) });
+      return { status: "skipped", reason: "dated-open-failed" };
+    }
+    try {
+      await placeEntry(perpLeg.symbol, perpLeg.side === "long" ? "Buy" : "Sell", perpLeg.qtyStr, "linear");
+    } catch (err) {
+      log({ ts: observedAt, event: "calendar-spread-perp-open-failed-compensating", err: err instanceof Error ? err.message : String(err) });
       try {
-        await client.createOrder({ category: "linear", symbol: perpLeg.symbol, side: perpLeg.side === "long" ? "Sell" : "Buy", qty: perpLeg.qtyStr, orderType: "Market", reduceOnly: true });
+        await client.createOrder({ category: "linear", symbol: datedLeg.symbol, side: datedLeg.side === "long" ? "Sell" : "Buy", qty: datedLeg.qtyStr, orderType: "Market", reduceOnly: true });
       } catch (compErr) {
         log({ ts: observedAt, event: "calendar-spread-compensation-failed", error: compErr instanceof Error ? compErr.message : String(compErr) });
-        await alerter.send(`calendar-spread COMPENSATION FAILED`).catch(() => {});
+        await alerter.send(`calendar-spread COMPENSATION FAILED (dated leg open)`).catch(() => {});
       }
-      await alerter.send(`calendar-spread dated open failed (compensated)`).catch(() => {});
-      return { status: "compensated", reason: "dated-open-failed" };
+      await alerter.send(`calendar-spread perp open failed (dated compensated)`).catch(() => {});
+      return { status: "compensated", reason: "perp-open-failed" };
     }
 
     // Backup safety net — exchange-side stops on each leg. WIDE (≥500 bps
