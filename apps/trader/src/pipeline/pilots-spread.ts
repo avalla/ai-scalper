@@ -102,7 +102,10 @@ export const calendarSpreadAdapter: ExecutionAdapter = async (intent, ctx): Prom
       const r = await placeOrderWithMakerPreference(
         { category, symbol, side, qty },
         { client, tickerSource, log },
-        { timeoutMs: 30_000, pollIntervalMs: 2_000, fallbackToTaker: true },
+        // Maker-only on entry — no taker fallback. Real-world fee/slippage on
+        // taker fills was eroding the spread edge (~$7/10 trades observed live).
+        // Better to skip a trade than pay taker fees on entry.
+        { timeoutMs: 30_000, pollIntervalMs: 2_000, fallbackToTaker: false },
       );
       if (r.status === "skipped-failed") throw new Error(r.reason);
       return;
