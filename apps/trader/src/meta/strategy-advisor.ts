@@ -24,6 +24,39 @@ export interface MarketRegimeSnapshot {
     netEdgeBps: number;
     action: string;
   }>;
+  /** Optional multi-TF chart context (step-2 enhancement). When present, lets
+   *  the LLM perform trader-like technical reading: trend across 5m/1h/4h, vol
+   *  expansion, OB imbalance. Absent = legacy regime-only advisor input. */
+  chartContext?: ChartContext;
+}
+
+export interface KlineSummary {
+  /** Number of bars summarized (typically 24). */
+  barsSampled: number;
+  /** Highest high across the window. */
+  rangeHigh: number;
+  /** Lowest low across the window. */
+  rangeLow: number;
+  /** (high - low) / low expressed as percent. */
+  rangePct: number;
+  /** (last_close - first_close) / first_close in bps. Positive = uptrend. */
+  trendBps: number;
+  /** Last bar's volume divided by mean of the prior bars. >1.5 = expansion. */
+  volumeRatioVsAvg: number;
+  /** Most recent close. */
+  lastClose: number;
+}
+
+export interface ChartContext {
+  klines5m: KlineSummary;
+  klines1h: KlineSummary;
+  klines4h: KlineSummary;
+  /** Top-of-book snapshot for BTCUSDT perp. */
+  orderbook: {
+    bid1Price: number;
+    ask1Price: number;
+    spreadBps: number;
+  };
 }
 
 export interface RecentStrategyPerformance {
@@ -66,7 +99,15 @@ const SYSTEM_PROMPT =
   "You are an expert quantitative trading advisor for a multi-strategy crypto-perpetuals bot. " +
   "Given current market regime indicators and recent performance of available strategies, " +
   "recommend the SINGLE strategy that should run for the next 30 minutes. Be decisive but " +
-  "conservative — recommend 'halt' if no strategy has a clear edge given the regime.";
+  "conservative — recommend 'halt' if no strategy has a clear edge given the regime.\n\n" +
+  "Trader-style chart analysis (when chartContext is present):\n" +
+  "- Compare 5m/1h/4h trends. Aligned trends = trending regime → favor longer-tf or bollinger-adx (ADX>25).\n" +
+  "- Diverging trends (5m vs 4h opposite) = ranging/whipsaw → favor pairs-trading or basis-arb.\n" +
+  "- 1h range narrow (<0.5%) + ADX low = compression → expect breakout; recommend halt OR bollinger-adx with wide stops.\n" +
+  "- 1h volumeRatioVsAvg > 2.0 = vol expansion underway → trending strategies usually outperform.\n" +
+  "- 4h range > 3% with reversal in 5m = exhaustion → favor mean-reversion.\n" +
+  "- OB spread > 5 bps on BTC perp = thin liquidity → AVOID strategies sensitive to execution cost (calendar-spread, basis-arb).\n" +
+  "- Always weigh recent performance: a strategy net-negative in last 24h should be deprioritized unless regime has just flipped.";
 
 const STRATEGY_DESCRIPTIONS =
   "Available strategies and their philosophies:\n" +

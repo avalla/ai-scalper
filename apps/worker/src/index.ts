@@ -343,6 +343,9 @@ let pumpScannerStack: PumpScannerWorkerStack | null = null;
 let boardHandle: BoardServerHandle | null = null;
 /** Optional ws-feeder subprocess (spawned by main() when USE_WEBSOCKET=true). */
 let wsFeederProcess: ReturnType<typeof Bun.spawn> | null = null;
+/** Optional LLM advisor subprocess (spawned when ANTHROPIC_API_KEY is set
+ *  AND advisor.enabled is true in the trader config). */
+let advisorProcess: ReturnType<typeof Bun.spawn> | null = null;
 
 async function main(): Promise<void> {
   // ── Optional ws-feeder subprocess (Phase 1 WS feed). ────────────────────
@@ -361,6 +364,39 @@ async function main(): Promise<void> {
       event: "ws-feeder-spawned",
       pid: wsFeederProcess.pid,
     }));
+  }
+
+  // ── Optional LLM strategy advisor (Step 1+2 — see strategy-advisor.ts). ─
+  // Spawned when ANTHROPIC_API_KEY is in env. Reads the live trader config
+  // to check advisor.enabled. Advisory-only: writes JSON artifact + webhook,
+  // never mutates the running trader.
+  if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim() !== "") {
+    try {
+      const traderCfg = readTraderConfig(process.env);
+      if (traderCfg.advisorEnabled) {
+        const traderAppDir = join(__dirname, "..", "..", "trader");
+        advisorProcess = Bun.spawn({
+          cmd: ["bun", "src/meta/strategy-advisor-runner-cli.ts"],
+          cwd: traderAppDir,
+          env: process.env,
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "advisor-spawned",
+          pid: advisorProcess.pid,
+          model: traderCfg.advisorModel,
+          intervalMinutes: traderCfg.advisorIntervalMinutes,
+        }));
+      }
+    } catch (err) {
+      console.warn(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "advisor-spawn-failed",
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
   }
 
   await queue.waitUntilReady();
@@ -631,6 +667,10 @@ async function shutdown(signal: string): Promise<void> {
     if (wsFeederProcess && !wsFeederProcess.killed) {
       try { wsFeederProcess.kill("SIGTERM"); } catch { /* ignore */ }
       console.log(JSON.stringify({ event: "shutdown-progress", step: "ws-feeder-killed" }));
+    }
+    if (advisorProcess && !advisorProcess.killed) {
+      try { advisorProcess.kill("SIGTERM"); } catch { /* ignore */ }
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "advisor-killed" }));
     }
     if (boardHandle) {
       await boardHandle.close();

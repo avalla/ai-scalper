@@ -9,6 +9,8 @@ import { resolveProjectPath } from "@ai-scalper/trading-core";
 import type { createBybitClient } from "@ai-scalper/bybit-client";
 import type { TickerSource } from "@ai-scalper/bybit-client/ticker-source";
 import type {
+  ChartContext,
+  KlineSummary,
   MarketRegimeSnapshot,
   RecentStrategyPerformance,
 } from "./strategy-advisor";
@@ -26,6 +28,70 @@ function safeNumber(s: string | undefined): number {
   if (!s) return 0;
   const v = Number(s);
   return Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Summarize a Bybit kline list (newest-first) into a compact descriptor for
+ * the LLM. Returns zeros if input is empty/malformed.
+ */
+export function summarizeKlines(klines: ReadonlyArray<{
+  highPrice?: string; lowPrice?: string; closePrice?: string; volume?: string;
+}>): KlineSummary {
+  if (klines.length === 0) {
+    return { barsSampled: 0, rangeHigh: 0, rangeLow: 0, rangePct: 0, trendBps: 0, volumeRatioVsAvg: 0, lastClose: 0 };
+  }
+  // Bybit is newest-first; reverse to oldest-first for trend calc.
+  const oldestFirst = [...klines].reverse();
+  const highs = oldestFirst.map((k) => safeNumber(k.highPrice)).filter((n) => n > 0);
+  const lows = oldestFirst.map((k) => safeNumber(k.lowPrice)).filter((n) => n > 0);
+  const closes = oldestFirst.map((k) => safeNumber(k.closePrice)).filter((n) => n > 0);
+  const volumes = oldestFirst.map((k) => safeNumber(k.volume));
+  if (highs.length === 0 || lows.length === 0 || closes.length === 0) {
+    return { barsSampled: 0, rangeHigh: 0, rangeLow: 0, rangePct: 0, trendBps: 0, volumeRatioVsAvg: 0, lastClose: 0 };
+  }
+  const rangeHigh = Math.max(...highs);
+  const rangeLow = Math.min(...lows);
+  const firstClose = closes[0]!;
+  const lastClose = closes[closes.length - 1]!;
+  const trendBps = firstClose > 0 ? ((lastClose - firstClose) / firstClose) * 10_000 : 0;
+  const rangePct = rangeLow > 0 ? ((rangeHigh - rangeLow) / rangeLow) * 100 : 0;
+  const lastVol = volumes[volumes.length - 1] ?? 0;
+  const priorVols = volumes.slice(0, -1).filter((v) => v > 0);
+  const avgPriorVol = priorVols.length > 0
+    ? priorVols.reduce((s, v) => s + v, 0) / priorVols.length
+    : 0;
+  const volumeRatioVsAvg = avgPriorVol > 0 ? lastVol / avgPriorVol : 0;
+  return {
+    barsSampled: oldestFirst.length,
+    rangeHigh, rangeLow, rangePct,
+    trendBps, volumeRatioVsAvg, lastClose,
+  };
+}
+
+async function collectChartContext(deps: {
+  client: BybitClient;
+  tickerSource: TickerSource;
+}): Promise<ChartContext | undefined> {
+  try {
+    const [k5, k60, k240, ticker] = await Promise.all([
+      deps.client.getKlines({ category: "linear", symbol: "BTCUSDT", interval: "5", limit: 24 }),
+      deps.client.getKlines({ category: "linear", symbol: "BTCUSDT", interval: "60", limit: 24 }),
+      deps.client.getKlines({ category: "linear", symbol: "BTCUSDT", interval: "240", limit: 24 }),
+      deps.tickerSource.getTicker("BTCUSDT", { category: "linear" }),
+    ]);
+    const bid = safeNumber(ticker.bid1Price);
+    const ask = safeNumber(ticker.ask1Price);
+    const mid = (bid + ask) / 2;
+    const spreadBps = mid > 0 ? ((ask - bid) / mid) * 10_000 : 0;
+    return {
+      klines5m: summarizeKlines(k5),
+      klines1h: summarizeKlines(k60),
+      klines4h: summarizeKlines(k240),
+      orderbook: { bid1Price: bid, ask1Price: ask, spreadBps },
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export async function collectRegime(deps: {
@@ -108,6 +174,9 @@ export async function collectRegime(deps: {
     }
   } catch { /* ignore */ }
 
+  // Chart context (multi-TF + L1 OB) — best-effort, undefined on failure.
+  const chartContext = await collectChartContext({ client: deps.client, tickerSource: deps.tickerSource });
+
   return {
     observedAt,
     btcPrice,
@@ -116,6 +185,7 @@ export async function collectRegime(deps: {
     avgFundingRateBps,
     spotPerpBasisBps,
     topRankedSetups,
+    ...(chartContext ? { chartContext } : {}),
   };
 }
 
