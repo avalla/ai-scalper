@@ -160,7 +160,7 @@
     "perpSymbol": "BTCUSDT",
     "datedSymbol": "BTCUSDT-26JUN26",
     "datedDeliveryAt": 1782460800000,
-    "entryThresholdBps": 35,
+    "entryThresholdBps": 25,
     "exitThresholdBps": 5,
     "preSettlementCloseHours": 24,
     "maxNotionalUsdPerLeg": 40,
