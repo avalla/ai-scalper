@@ -168,6 +168,19 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     orderSupervisorModel: "claude-haiku-4-5-20251001",
     orderSupervisorTimeoutMs: 8000,
     orderSupervisorOnErrorBehavior: "reject" as const,
+    riskOfficerEnabled: false,
+    riskOfficerIntervalMinutes: 5,
+    riskOfficerBaselineEquityUsd: 0,
+    riskOfficerYellowDrawdownPct: 3,
+    riskOfficerRedDrawdownPct: 6,
+    riskOfficerYellowHourLossUsd: 3,
+    riskOfficerRedHourLossUsd: 6,
+    riskOfficerArtifactPath: "/tmp/risk-officer.json",
+    executionAuditorEnabled: false,
+    executionAuditorIntervalMinutes: 30,
+    executionAuditorWindowMinutes: 60,
+    executionAuditorArtifactPath: "/tmp/execution-auditor.json",
+    alertsWebhookUrl: "",
   };
   return { ...cfg, ...overrides };
 }

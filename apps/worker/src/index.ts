@@ -346,6 +346,9 @@ let wsFeederProcess: ReturnType<typeof Bun.spawn> | null = null;
 /** Optional LLM advisor subprocess (spawned when ANTHROPIC_API_KEY is set
  *  AND advisor.enabled is true in the trader config). */
 let advisorProcess: ReturnType<typeof Bun.spawn> | null = null;
+/** Phase A: Risk Officer + Execution Auditor (deterministic meta-agents). */
+let riskOfficerProcess: ReturnType<typeof Bun.spawn> | null = null;
+let executionAuditorProcess: ReturnType<typeof Bun.spawn> | null = null;
 
 async function main(): Promise<void> {
   // ── Optional ws-feeder subprocess (Phase 1 WS feed). ────────────────────
@@ -397,6 +400,46 @@ async function main(): Promise<void> {
         error: err instanceof Error ? err.message : String(err),
       }));
     }
+  }
+
+  // ── Phase A meta-agents: Risk Officer + Execution Auditor (deterministic). ──
+  // These do NOT require an Anthropic key — they're rules-based. We gate them
+  // on their own enabled flag in trader config.
+  try {
+    const traderCfg = readTraderConfig(process.env);
+    const traderAppDir = join(__dirname, "..", "..", "trader");
+    if (traderCfg.riskOfficerEnabled) {
+      riskOfficerProcess = Bun.spawn({
+        cmd: ["bun", "src/meta/risk-officer-cli.ts"],
+        cwd: traderAppDir, env: process.env, stdout: "inherit", stderr: "inherit",
+      });
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "risk-officer-spawned",
+        pid: riskOfficerProcess.pid,
+        intervalMinutes: traderCfg.riskOfficerIntervalMinutes,
+        baselineEquityUsd: traderCfg.riskOfficerBaselineEquityUsd,
+      }));
+    }
+    if (traderCfg.executionAuditorEnabled) {
+      executionAuditorProcess = Bun.spawn({
+        cmd: ["bun", "src/meta/execution-auditor-cli.ts"],
+        cwd: traderAppDir, env: process.env, stdout: "inherit", stderr: "inherit",
+      });
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "execution-auditor-spawned",
+        pid: executionAuditorProcess.pid,
+        intervalMinutes: traderCfg.executionAuditorIntervalMinutes,
+        windowMinutes: traderCfg.executionAuditorWindowMinutes,
+      }));
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({
+      ts: new Date().toISOString(),
+      event: "phase-a-spawn-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
   }
 
   await queue.waitUntilReady();
@@ -671,6 +714,14 @@ async function shutdown(signal: string): Promise<void> {
     if (advisorProcess && !advisorProcess.killed) {
       try { advisorProcess.kill("SIGTERM"); } catch { /* ignore */ }
       console.log(JSON.stringify({ event: "shutdown-progress", step: "advisor-killed" }));
+    }
+    if (riskOfficerProcess && !riskOfficerProcess.killed) {
+      try { riskOfficerProcess.kill("SIGTERM"); } catch { /* ignore */ }
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "risk-officer-killed" }));
+    }
+    if (executionAuditorProcess && !executionAuditorProcess.killed) {
+      try { executionAuditorProcess.kill("SIGTERM"); } catch { /* ignore */ }
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "execution-auditor-killed" }));
     }
     if (boardHandle) {
       await boardHandle.close();

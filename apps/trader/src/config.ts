@@ -242,6 +242,22 @@ export interface TraderConfig {
   advisorEnabled: boolean;
   advisorIntervalMinutes: number;
   advisorModel: string;
+  // Risk Officer (Phase A meta-agent — deterministic, no LLM)
+  riskOfficerEnabled: boolean;
+  riskOfficerIntervalMinutes: number;
+  riskOfficerBaselineEquityUsd: number;
+  riskOfficerYellowDrawdownPct: number;
+  riskOfficerRedDrawdownPct: number;
+  riskOfficerYellowHourLossUsd: number;
+  riskOfficerRedHourLossUsd: number;
+  riskOfficerArtifactPath: string;
+  // Execution Auditor (Phase A meta-agent — deterministic, no LLM)
+  executionAuditorEnabled: boolean;
+  executionAuditorIntervalMinutes: number;
+  executionAuditorWindowMinutes: number;
+  executionAuditorArtifactPath: string;
+  // Webhook URL shared across alerters
+  alertsWebhookUrl: string;
   // LLM order supervisor
   orderSupervisorEnabled: boolean;
   orderSupervisorStrategies: string[];
@@ -333,6 +349,8 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
   const llmManaged = sect(cfg, "llmManaged");
   const calendarSpread = sect(cfg, "calendarSpread");
   const advisor = sect(cfg, "advisor");
+  const riskOfficer = sect(cfg, "riskOfficer");
+  const executionAuditor = sect(cfg, "executionAuditor");
   const pairs = sect(cfg, "pairs");
   const bollingerAdx = sect(cfg, "bollingerAdx");
   const basisArb = sect(cfg, "basisArb");
@@ -484,6 +502,19 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     advisorEnabled: (advisor.enabled as boolean) ?? false,
     advisorIntervalMinutes: (advisor.intervalMinutes as number) ?? 30,
     advisorModel: (advisor.model as string) ?? "claude-haiku-4-5-20251001",
+    riskOfficerEnabled: (riskOfficer.enabled as boolean) ?? false,
+    riskOfficerIntervalMinutes: (riskOfficer.intervalMinutes as number) ?? 5,
+    riskOfficerBaselineEquityUsd: (riskOfficer.baselineEquityUsd as number) ?? 0,
+    riskOfficerYellowDrawdownPct: (riskOfficer.yellowDrawdownPct as number) ?? 3,
+    riskOfficerRedDrawdownPct: (riskOfficer.redDrawdownPct as number) ?? 6,
+    riskOfficerYellowHourLossUsd: (riskOfficer.yellowHourLossUsd as number) ?? 3,
+    riskOfficerRedHourLossUsd: (riskOfficer.redHourLossUsd as number) ?? 6,
+    riskOfficerArtifactPath: (riskOfficer.artifactPath as string) ?? "apps/trader/tmp/risk-officer-latest.json",
+    executionAuditorEnabled: (executionAuditor.enabled as boolean) ?? false,
+    executionAuditorIntervalMinutes: (executionAuditor.intervalMinutes as number) ?? 30,
+    executionAuditorWindowMinutes: (executionAuditor.windowMinutes as number) ?? 60,
+    executionAuditorArtifactPath: (executionAuditor.artifactPath as string) ?? "apps/trader/tmp/execution-auditor-latest.json",
+    alertsWebhookUrl: (alerts.webhookUrl as string) ?? "",
     orderSupervisorEnabled: (orderSupervisor.enabled as boolean) ?? false,
     orderSupervisorStrategies: (orderSupervisor.strategies as string[])
       ?? ["funding-arb", "basis-arb", "pairs-trading", "calendar-spread"],

@@ -174,6 +174,24 @@
     "intervalMinutes": 30,
     "model": "claude-haiku-4-5-20251001"
   },
+  "riskOfficer": {
+    "_doc": "Phase A meta-agent — deterministic risk gate. Runs every 5min, emits traffic-light verdict. baselineEquityUsd 189.42 captures the wallet at first live trade on 2026-06-05. Yellow at 3% drawdown ($5.68), red at 6% ($11.36).",
+    "enabled": true,
+    "intervalMinutes": 5,
+    "baselineEquityUsd": 189.42,
+    "yellowDrawdownPct": 3,
+    "redDrawdownPct": 6,
+    "yellowHourLossUsd": 3,
+    "redHourLossUsd": 6,
+    "artifactPath": "apps/trader/tmp/risk-officer-latest.json"
+  },
+  "executionAuditor": {
+    "_doc": "Phase A meta-agent — deterministic execution audit. Every 30min, fetches Bybit fills + ledger, computes maker/taker ratio, real-vs-estimated fees, wallet-vs-ledger gap.",
+    "enabled": true,
+    "intervalMinutes": 30,
+    "windowMinutes": 60,
+    "artifactPath": "apps/trader/tmp/execution-auditor-latest.json"
+  },
   "pairs": {
     "leg1Symbol": "BTCUSDT",
     "leg2Symbol": "ETHUSDT",
