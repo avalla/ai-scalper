@@ -33,7 +33,8 @@ function makeTickerSource(opts: { perpPrice?: number; datedPrice?: number } = {}
   return {
     async getTicker(symbol: string) {
       const isPerp = symbol === "BTCUSDT";
-      return { lastPrice: String(isPerp ? (opts.perpPrice ?? 50000) : (opts.datedPrice ?? 50300)) };
+      const last = isPerp ? (opts.perpPrice ?? 50000) : (opts.datedPrice ?? 50300);
+      return { lastPrice: String(last), bid1Price: String(last - 0.5), ask1Price: String(last + 0.5) };
     },
     peek() { return null; },
   };
@@ -134,18 +135,24 @@ function makeJob(overrides: Partial<CalendarSpreadManageJobData> = {}): Calendar
 }
 
 describe("processCalendarSpreadManageTick", () => {
-  test("exits both legs reduce-only on convergence", async () => {
+  test("exits both legs reduce-only on convergence (perp via maker, dated via Market)", async () => {
     const entries: ClosedPositionLedgerEntry[] = [];
     const orders: any[] = [];
+    let orderIdCounter = 0;
     const deps: CalendarSpreadManageProcessorDeps = {
       config: makeConfig({ paperTrading: false }),
       client: {
         async getPosition() { return { size: "0.001" }; },
         async getTicker(p: any) {
           // perp 50_000, dated 50_010 → spread = ~2 bps (≤ exit threshold 5)
-          return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "50010" };
+          const last = p.symbol === "BTCUSDT" ? 50000 : 50010;
+          return { lastPrice: String(last), bid1Price: String(last - 0.5), ask1Price: String(last + 0.5) };
         },
-        async createOrder(args: any) { orders.push(args); },
+        async createOrder(args: any) {
+          orders.push(args);
+          return { orderId: `mock-${++orderIdCounter}` };
+        },
+        async getRealtimeOrder() { return { orderStatus: "Filled", avgPrice: "50000", cumExecQty: "0.001" }; },
       } as any,
       tickerSource: makeTickerSource({ perpPrice: 50000, datedPrice: 50010 }),
       alerter: { async send() {} } as any,
@@ -156,8 +163,14 @@ describe("processCalendarSpreadManageTick", () => {
     const r = await processCalendarSpreadManageTick(makeJob(), deps);
     expect(r.status).toBe("complete");
     if (r.status === "complete") expect(r.reason).toBe("spread-converged");
+    // 2 orders: perp Limit PostOnly (maker), dated Market (taker)
     expect(orders).toHaveLength(2);
+    expect(orders[0].symbol).toBe("BTCUSDT");
+    expect(orders[0].orderType).toBe("Limit");
+    expect(orders[0].timeInForce).toBe("PostOnly");
     expect(orders[0].reduceOnly).toBe(true);
+    expect(orders[1].symbol).toBe("BTC-26SEP25");
+    expect(orders[1].orderType).toBe("Market");
     expect(orders[1].reduceOnly).toBe(true);
     expect(entries[0]!.strategyType).toBe("calendar-spread");
     expect(entries[0]!.calendarDatedSymbol).toBe("BTC-26SEP25");

@@ -14,7 +14,7 @@ import {
   type PairsTradingManageJobData,
   type TradingIntent,
 } from "@ai-scalper/queueing";
-import { calendarDecide, computeCalendarSpreadBps } from "../strategies/calendar-spread";
+import { calendarDecideForEntry } from "../strategies/calendar-spread";
 import { pairsDecide, type PairsCache } from "../strategies/pairs-trading";
 import { computeQtyFromNotional, makePositionId } from "../strategies/shared/trade-job-helpers";
 import type { ExecutionAdapter, ExecutionResult, StrategyEvaluator } from "./types";
@@ -35,25 +35,30 @@ export const calendarSpreadEvaluator: StrategyEvaluator = async (ctx) => {
   const datedDeliveryAt = rotated?.deliveryAt ?? config.calendarDatedDeliveryAt;
   if (!datedSymbol || datedDeliveryAt <= 0) return [];
 
-  let perpPrice = 0; let datedPrice = 0;
+  let perpBid = 0, perpAsk = 0, datedBid = 0, datedAsk = 0, perpMid = 0;
   try {
     const [perpT, datedT] = await Promise.all([
       tickerSource.getTicker(config.calendarPerpSymbol, { category: "linear" }),
       tickerSource.getTicker(datedSymbol, { category: "linear" }),
     ]);
-    perpPrice = Number(perpT.lastPrice);
-    datedPrice = Number(datedT.lastPrice);
+    perpBid = Number(perpT.bid1Price); perpAsk = Number(perpT.ask1Price);
+    datedBid = Number(datedT.bid1Price); datedAsk = Number(datedT.ask1Price);
+    perpMid = (perpBid + perpAsk) / 2;
   } catch (err) {
     log({ ts: observedAt, event: "calendar-spread-evaluate-skip", reason: "ticker-unavailable", err: err instanceof Error ? err.message : String(err) });
     return [];
   }
-  if (!Number.isFinite(perpPrice) || perpPrice <= 0 || !Number.isFinite(datedPrice) || datedPrice <= 0) return [];
+  for (const v of [perpBid, perpAsk, datedBid, datedAsk]) {
+    if (!Number.isFinite(v) || v <= 0) return [];
+  }
 
-  const decision = calendarDecide({
-    perpPrice, datedPrice, datedDeliveryAt, now, position: null,
+  // Realizable-spread entry decision (post-mortem fix: was using mark-price
+  // spread, which overstated capture by ~10-15 bps because it ignored bid/ask).
+  const decision = calendarDecideForEntry({
+    perpBid, perpAsk, datedBid, datedAsk,
+    datedDeliveryAt, now,
     config: {
       entryThresholdBps: config.calendarEntryThresholdBps,
-      exitThresholdBps: config.calendarExitThresholdBps,
       preSettlementCloseHours: config.calendarPreSettlementCloseHours,
     },
   });
@@ -67,21 +72,27 @@ export const calendarSpreadEvaluator: StrategyEvaluator = async (ctx) => {
 
   const notionalPerLegUsd = config.calendarMaxNotionalUsdPerLeg;
   const leverage = config.calendarLeverage;
-  const q = computeQtyFromNotional({ notionalUsd: notionalPerLegUsd, leverage, price: perpPrice, qtyStep: perpInstr.lotSizeFilter.qtyStep, minOrderQty: perpInstr.lotSizeFilter.minOrderQty });
+  // refPrice for sizing uses perp mid (between bid and ask) — represents the
+  // expected fill price for the perp leg.
+  const q = computeQtyFromNotional({ notionalUsd: notionalPerLegUsd, leverage, price: perpMid, qtyStep: perpInstr.lotSizeFilter.qtyStep, minOrderQty: perpInstr.lotSizeFilter.minOrderQty });
   if (!q) return [];
+  // For dated refPrice we use the mid too — same convention.
+  const datedMid = (datedBid + datedAsk) / 2;
 
   const intent: TradingIntent = {
     strategy: "calendar-spread",
     symbol: config.calendarPerpSymbol,
     legs: [
-      { symbol: config.calendarPerpSymbol, side: decision.perpSide, category: "linear", qty: q.qty, qtyStr: q.qtyStr, refPrice: perpPrice },
-      { symbol: datedSymbol, side: decision.datedSide, category: "linear", qty: q.qty, qtyStr: q.qtyStr, refPrice: datedPrice },
+      { symbol: config.calendarPerpSymbol, side: decision.perpSide, category: "linear", qty: q.qty, qtyStr: q.qtyStr, refPrice: perpMid },
+      { symbol: datedSymbol, side: decision.datedSide, category: "linear", qty: q.qty, qtyStr: q.qtyStr, refPrice: datedMid },
     ],
     notionalUsd: notionalPerLegUsd, leverage,
     reason: decision.reason, evaluatedAt: observedAt,
     managePayload: {
       qtyStep: perpInstr.lotSizeFilter.qtyStep, minOrderQty: perpInstr.lotSizeFilter.minOrderQty,
-      entrySpreadBps: computeCalendarSpreadBps(perpPrice, datedPrice),
+      // Store realizable entry spread — this is what the manager compares against
+      // to detect divergence (entry-to-current must not WIDEN beyond divergence stop).
+      entrySpreadBps: decision.spreadBps,
       datedDeliveryAt,
     },
   };

@@ -117,7 +117,10 @@ describe("processStrategyEvaluateTick", () => {
 
   test("calendar-spread leverage scales qty linearly (5x leverage → 5x qty, same margin)", async () => {
     const calClient: any = {
-      async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "50300" }; },
+      async getTicker(p: any) {
+        const last = p.symbol === "BTCUSDT" ? 50000 : 50300;
+        return { lastPrice: String(last), bid1Price: String(last - 0.5), ask1Price: String(last + 0.5) };
+      },
       async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.0001", minOrderQty: "0.0001" } }; },
       async createOrder() {}, async setLeverage() {},
     };
@@ -307,7 +310,10 @@ describe("processTradingAgentExecute", () => {
 
   test("end-to-end: calendar-spread evaluate (dated rich) → agent opens two-leg", async () => {
     const calClient: any = {
-      async getTicker(p: any) { return { lastPrice: p.symbol === "BTCUSDT" ? "50000" : "50300" }; },
+      async getTicker(p: any) {
+        const last = p.symbol === "BTCUSDT" ? 50000 : 50300;
+        return { lastPrice: String(last), bid1Price: String(last - 0.5), ask1Price: String(last + 0.5) };
+      },
       async getInstrumentInfo() { return { lotSizeFilter: { qtyStep: "0.001", minOrderQty: "0.001" } }; },
       async createOrder() {}, async setLeverage() {},
     };

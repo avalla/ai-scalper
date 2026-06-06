@@ -17,6 +17,7 @@ import { calendarDecide, computeCalendarSpreadBps, type CalendarDecision } from 
 import type { StrategySharedState } from "./shared/bullmq-shared-state";
 import { appendDecisionHistory } from "./shared/trade-job-helpers";
 import type { ClosedPositionLedgerEntry } from "../trading/position-ledger";
+import { placeOrderWithMakerPreference } from "../pipeline/maker-execution";
 
 type BybitClient = ReturnType<typeof createBybitClient>;
 
@@ -143,35 +144,46 @@ export async function processCalendarSpreadManageTick(
     };
   }
 
-  // exit — close both legs reduce-only
+  // exit — close both legs reduce-only.
+  // Post-mortem: 65% of all fees came from taker exits ($4.93/16 trades). The
+  // PERP leg is highly liquid → maker close with short timeout almost always
+  // fills with rebate (-2 vs +5.5 bps). The DATED leg stays Market (illiquid;
+  // legging-out risk from a stuck maker close is worse than the fee saving).
   if (!config.paperTrading) {
-    const legs: Array<{ symbol: string; side: "Buy" | "Sell"; label: string }> = [
-      { symbol: jobData.perpSymbol, side: jobData.perpSide === "long" ? "Sell" : "Buy", label: "perp" },
-      { symbol: jobData.datedSymbol, side: jobData.datedSide === "long" ? "Sell" : "Buy", label: "dated" },
-    ];
-    for (const leg of legs) {
-      try {
-        await client.createOrder({
-          category: "linear", symbol: leg.symbol,
-          side: leg.side, qty: String(jobData.qty), orderType: "Market", reduceOnly: true,
-        });
-      } catch (err) {
-        log({
-          ts: observedAt, event: "calendar-spread-close-leg-failed",
-          leg: leg.label, symbol: leg.symbol,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        await alerter.send(`calendar-spread close ${leg.label} failed: ${leg.symbol}`).catch(() => {});
-        return {
-          status: "continue",
-          updatedData: {
-            ...jobData, lastReviewAt: observedAt,
-            decisionsHistory: appendDecisionHistory(jobData.decisionsHistory, {
-              at: observedAt, action: "close-attempt-failed", reasoning: leg.label,
-            }),
-          },
-        };
-      }
+    const perpCloseSide: "Buy" | "Sell" = jobData.perpSide === "long" ? "Sell" : "Buy";
+    const datedCloseSide: "Buy" | "Sell" = jobData.datedSide === "long" ? "Sell" : "Buy";
+
+    // Perp: maker-first with timeout, automatic fallback to Market reduceOnly.
+    try {
+      const r = await placeOrderWithMakerPreference(
+        { category: "linear", symbol: jobData.perpSymbol, side: perpCloseSide, qty: String(jobData.qty), reduceOnly: true },
+        { client, tickerSource, log: (p) => log({ ts: observedAt, ...p }) },
+        { timeoutMs: 10_000, pollIntervalMs: 1_000, fallbackToTaker: true },
+      );
+      if (r.status === "skipped-failed") throw new Error(`perp-close-failed:${r.reason}`);
+    } catch (err) {
+      log({ ts: observedAt, event: "calendar-spread-close-leg-failed", leg: "perp", symbol: jobData.perpSymbol, error: err instanceof Error ? err.message : String(err) });
+      await alerter.send(`calendar-spread close perp failed: ${jobData.perpSymbol}`).catch(() => {});
+      return {
+        status: "continue",
+        updatedData: { ...jobData, lastReviewAt: observedAt,
+          decisionsHistory: appendDecisionHistory(jobData.decisionsHistory, { at: observedAt, action: "close-attempt-failed", reasoning: "perp" }),
+        },
+      };
+    }
+
+    // Dated: Market reduceOnly (illiquid; legging-out risk > taker fee).
+    try {
+      await client.createOrder({ category: "linear", symbol: jobData.datedSymbol, side: datedCloseSide, qty: String(jobData.qty), orderType: "Market", reduceOnly: true });
+    } catch (err) {
+      log({ ts: observedAt, event: "calendar-spread-close-leg-failed", leg: "dated", symbol: jobData.datedSymbol, error: err instanceof Error ? err.message : String(err) });
+      await alerter.send(`calendar-spread close dated failed: ${jobData.datedSymbol}`).catch(() => {});
+      return {
+        status: "continue",
+        updatedData: { ...jobData, lastReviewAt: observedAt,
+          decisionsHistory: appendDecisionHistory(jobData.decisionsHistory, { at: observedAt, action: "close-attempt-failed", reasoning: "dated" }),
+        },
+      };
     }
   }
 
