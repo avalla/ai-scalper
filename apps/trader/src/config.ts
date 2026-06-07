@@ -256,6 +256,11 @@ export interface TraderConfig {
   executionAuditorIntervalMinutes: number;
   executionAuditorWindowMinutes: number;
   executionAuditorArtifactPath: string;
+  // Event Feeder (Phase B — high-signal external events; RSS/Telegram pending)
+  eventFeederEnabled: boolean;
+  eventFeederIntervalMinutes: number;
+  eventFeederFundingThresholdBps: number;
+  eventFeederFundingTopN: number;
   // Webhook URL shared across alerters
   alertsWebhookUrl: string;
   // LLM order supervisor
@@ -351,6 +356,7 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
   const advisor = sect(cfg, "advisor");
   const riskOfficer = sect(cfg, "riskOfficer");
   const executionAuditor = sect(cfg, "executionAuditor");
+  const eventFeeder = sect(cfg, "eventFeeder");
   const pairs = sect(cfg, "pairs");
   const bollingerAdx = sect(cfg, "bollingerAdx");
   const basisArb = sect(cfg, "basisArb");
@@ -514,6 +520,10 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     executionAuditorIntervalMinutes: (executionAuditor.intervalMinutes as number) ?? 30,
     executionAuditorWindowMinutes: (executionAuditor.windowMinutes as number) ?? 60,
     executionAuditorArtifactPath: (executionAuditor.artifactPath as string) ?? "apps/trader/tmp/execution-auditor-latest.json",
+    eventFeederEnabled: (eventFeeder.enabled as boolean) ?? false,
+    eventFeederIntervalMinutes: (eventFeeder.intervalMinutes as number) ?? 5,
+    eventFeederFundingThresholdBps: (eventFeeder.fundingThresholdBps as number) ?? 30,
+    eventFeederFundingTopN: (eventFeeder.fundingTopN as number) ?? 20,
     alertsWebhookUrl: (alerts.webhookUrl as string) ?? "",
     orderSupervisorEnabled: (orderSupervisor.enabled as boolean) ?? false,
     orderSupervisorStrategies: (orderSupervisor.strategies as string[])

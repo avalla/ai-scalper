@@ -192,6 +192,13 @@
     "windowMinutes": 60,
     "artifactPath": "apps/trader/tmp/execution-auditor-latest.json"
   },
+  "eventFeeder": {
+    "_doc": "Phase B — high-signal external events polled into Redis sorted set ai-scalper:events:recent. MVP: Bybit announcements + funding-rate extremes (|fundingBps| > 30 on top-N by turnover). RSS/Telegram planned. Read by future strategy gates + advisor.",
+    "enabled": true,
+    "intervalMinutes": 5,
+    "fundingThresholdBps": 30,
+    "fundingTopN": 20
+  },
   "pairs": {
     "leg1Symbol": "BTCUSDT",
     "leg2Symbol": "ETHUSDT",

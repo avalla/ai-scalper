@@ -349,6 +349,8 @@ let advisorProcess: ReturnType<typeof Bun.spawn> | null = null;
 /** Phase A: Risk Officer + Execution Auditor (deterministic meta-agents). */
 let riskOfficerProcess: ReturnType<typeof Bun.spawn> | null = null;
 let executionAuditorProcess: ReturnType<typeof Bun.spawn> | null = null;
+/** Phase B: Event Feeder (high-signal external events into Redis). */
+let eventFeederProcess: ReturnType<typeof Bun.spawn> | null = null;
 
 async function main(): Promise<void> {
   // ── Optional ws-feeder subprocess (Phase 1 WS feed). ────────────────────
@@ -432,6 +434,18 @@ async function main(): Promise<void> {
         pid: executionAuditorProcess.pid,
         intervalMinutes: traderCfg.executionAuditorIntervalMinutes,
         windowMinutes: traderCfg.executionAuditorWindowMinutes,
+      }));
+    }
+    if (traderCfg.eventFeederEnabled) {
+      eventFeederProcess = Bun.spawn({
+        cmd: ["bun", "src/meta/event-feeder-cli.ts"],
+        cwd: traderAppDir, env: process.env, stdout: "inherit", stderr: "inherit",
+      });
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "event-feeder-spawned",
+        pid: eventFeederProcess.pid,
+        intervalMinutes: traderCfg.eventFeederIntervalMinutes,
       }));
     }
   } catch (err) {
@@ -722,6 +736,10 @@ async function shutdown(signal: string): Promise<void> {
     if (executionAuditorProcess && !executionAuditorProcess.killed) {
       try { executionAuditorProcess.kill("SIGTERM"); } catch { /* ignore */ }
       console.log(JSON.stringify({ event: "shutdown-progress", step: "execution-auditor-killed" }));
+    }
+    if (eventFeederProcess && !eventFeederProcess.killed) {
+      try { eventFeederProcess.kill("SIGTERM"); } catch { /* ignore */ }
+      console.log(JSON.stringify({ event: "shutdown-progress", step: "event-feeder-killed" }));
     }
     if (boardHandle) {
       await boardHandle.close();

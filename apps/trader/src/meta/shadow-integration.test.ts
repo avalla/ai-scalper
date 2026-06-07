@@ -225,6 +225,10 @@ function makeConfig(): TraderConfig {
     executionAuditorIntervalMinutes: 30,
     executionAuditorWindowMinutes: 60,
     executionAuditorArtifactPath: "/tmp/execution-auditor.json",
+    eventFeederEnabled: false,
+    eventFeederIntervalMinutes: 5,
+    eventFeederFundingThresholdBps: 30,
+    eventFeederFundingTopN: 20,
     alertsWebhookUrl: "",
   };
 }
