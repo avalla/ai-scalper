@@ -22,6 +22,8 @@ Environment=REDIS_URL=redis://127.0.0.1:6379
 Environment=USE_WEBSOCKET=true
 Environment=WS_FEEDER_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
 Environment=PATH=/home/assistant/.bun/bin:/usr/local/bin:/usr/bin:/bin
+# Shared Anthropic API key — enables the LLM advisor subprocess.
+EnvironmentFile=-/etc/ai-scalper/anthropic.env
 ExecStart=/home/assistant/.bun/bin/bun src/index.ts
 Restart=on-failure
 RestartSec=15
