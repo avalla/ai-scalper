@@ -184,7 +184,6 @@ function makeConfig(overrides: Partial<TraderConfig> = {}): TraderConfig {
     eventFeederIntervalMinutes: 5,
     eventFeederFundingThresholdBps: 30,
     eventFeederFundingTopN: 20,
-    alertsWebhookUrl: "",
   };
   return { ...cfg, ...overrides };
 }

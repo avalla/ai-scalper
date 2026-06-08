@@ -229,7 +229,6 @@ function makeConfig(): TraderConfig {
     eventFeederIntervalMinutes: 5,
     eventFeederFundingThresholdBps: 30,
     eventFeederFundingTopN: 20,
-    alertsWebhookUrl: "",
   };
 }
 

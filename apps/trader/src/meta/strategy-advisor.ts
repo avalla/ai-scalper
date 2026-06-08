@@ -57,6 +57,21 @@ export interface ChartContext {
     ask1Price: number;
     spreadBps: number;
   };
+  /** External high-signal events from the event-feeder (Bybit announcements,
+   *  funding extremes, etc.) within the last lookback window. Optional —
+   *  absent when no feeder is configured or no events fetched. */
+  recentEvents?: RecentEventSummary[];
+}
+
+/** Compact representation of an external event for advisor consumption.
+ *  Keeps payload small to stay within token budget. */
+export interface RecentEventSummary {
+  source: string;
+  signal: "high" | "medium" | "low";
+  sentiment: "bullish" | "bearish" | "neutral";
+  symbols: string[];
+  title: string;
+  ageMinutes: number;
 }
 
 export interface RecentStrategyPerformance {
@@ -107,7 +122,12 @@ const SYSTEM_PROMPT =
   "- 1h volumeRatioVsAvg > 2.0 = vol expansion underway → trending strategies usually outperform.\n" +
   "- 4h range > 3% with reversal in 5m = exhaustion → favor mean-reversion.\n" +
   "- OB spread > 5 bps on BTC perp = thin liquidity → AVOID strategies sensitive to execution cost (calendar-spread, basis-arb).\n" +
-  "- Always weigh recent performance: a strategy net-negative in last 24h should be deprioritized unless regime has just flipped.";
+  "- Always weigh recent performance: a strategy net-negative in last 24h should be deprioritized unless regime has just flipped.\n\n" +
+  "Event-driven cues (when recentEvents is present):\n" +
+  "- bybit-announcement high/bullish (new perp listing) → entry-day pump+dump pattern; AVOID; high vol but adverse selection.\n" +
+  "- bybit-announcement high/bearish (delisting, hack) → AVOID exposure on affected symbols.\n" +
+  "- funding-extreme high signal (|fundingBps| >= 50, sentiment is contrarian to funding sign) → setup for squeeze. funding-arb fits these.\n" +
+  "- Multiple medium events clustered = elevated background vol; favor mean-reversion (pairs-trading, basis-arb).";
 
 const STRATEGY_DESCRIPTIONS =
   "Available strategies and their philosophies:\n" +

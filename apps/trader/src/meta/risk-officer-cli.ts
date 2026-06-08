@@ -86,7 +86,7 @@ async function main(): Promise<void> {
   };
 
   const postWebhook = async (msg: string): Promise<void> => {
-    const url = cfg.alertsWebhookUrl;
+    const url = cfg.alertWebhookUrl;
     if (!url) return;
     try {
       await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: msg }) });
@@ -97,7 +97,7 @@ async function main(): Promise<void> {
     config: {
       intervalMinutes: cfg.riskOfficerIntervalMinutes,
       outputPath: cfg.riskOfficerArtifactPath,
-      alertWebhookUrl: cfg.alertsWebhookUrl,
+      alertWebhookUrl: cfg.alertWebhookUrl,
       baselineEquityUsd,
       thresholds: {
         ...DEFAULT_RISK_THRESHOLDS,

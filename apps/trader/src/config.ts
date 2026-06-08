@@ -261,8 +261,6 @@ export interface TraderConfig {
   eventFeederIntervalMinutes: number;
   eventFeederFundingThresholdBps: number;
   eventFeederFundingTopN: number;
-  // Webhook URL shared across alerters
-  alertsWebhookUrl: string;
   // LLM order supervisor
   orderSupervisorEnabled: boolean;
   orderSupervisorStrategies: string[];
@@ -524,7 +522,6 @@ export function readTraderConfig(env: NodeJS.ProcessEnv = process.env): TraderCo
     eventFeederIntervalMinutes: (eventFeeder.intervalMinutes as number) ?? 5,
     eventFeederFundingThresholdBps: (eventFeeder.fundingThresholdBps as number) ?? 30,
     eventFeederFundingTopN: (eventFeeder.fundingTopN as number) ?? 20,
-    alertsWebhookUrl: (alerts.webhookUrl as string) ?? "",
     orderSupervisorEnabled: (orderSupervisor.enabled as boolean) ?? false,
     orderSupervisorStrategies: (orderSupervisor.strategies as string[])
       ?? ["funding-arb", "basis-arb", "pairs-trading", "calendar-spread"],

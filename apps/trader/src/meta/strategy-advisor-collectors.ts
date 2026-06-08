@@ -12,6 +12,7 @@ import type {
   ChartContext,
   KlineSummary,
   MarketRegimeSnapshot,
+  RecentEventSummary,
   RecentStrategyPerformance,
 } from "./strategy-advisor";
 
@@ -19,10 +20,67 @@ type BybitClient = ReturnType<typeof createBybitClient>;
 
 interface RedisLike {
   lrange(key: string, start: number, stop: number): Promise<string[]>;
+  zrangebyscore?(key: string, min: number | string, max: number | string, withscores?: "WITHSCORES"): Promise<string[]>;
+}
+
+interface FeederEvent {
+  source?: string;
+  signal?: "high" | "medium" | "low";
+  sentiment?: "bullish" | "bearish" | "neutral";
+  symbols?: string[];
+  title?: string;
+  observedAt?: string;
+}
+
+/**
+ * Fetch recent high-signal events from Redis sorted set populated by the
+ * event-feeder. Returns most recent first, rank-deduped by source+signal
+ * priority. Returns empty array on any failure or absent feeder.
+ */
+export async function collectRecentEvents(
+  redis: RedisLike | null,
+  now: number = Date.now(),
+): Promise<RecentEventSummary[]> {
+  if (!redis || !redis.zrangebyscore) return [];
+  let raw: string[] = [];
+  try {
+    raw = await redis.zrangebyscore(EVENTS_RECENT_KEY, now - EVENTS_LOOKBACK_MS, now);
+  } catch { return []; }
+  const parsed: Array<{ ts: number; ev: FeederEvent }> = [];
+  for (const item of raw) {
+    try {
+      const ev = JSON.parse(item) as FeederEvent;
+      const ts = ev.observedAt ? Date.parse(ev.observedAt) : NaN;
+      if (!Number.isFinite(ts)) continue;
+      parsed.push({ ts, ev });
+    } catch { /* skip */ }
+  }
+  // Sort newest-first; rank-cap to MAX so prompt stays compact.
+  parsed.sort((a, b) => b.ts - a.ts);
+  // Prefer high-signal events when truncating.
+  const signalRank: Record<string, number> = { high: 3, medium: 2, low: 1 };
+  parsed.sort((a, b) => {
+    const sa = signalRank[a.ev.signal ?? "low"] ?? 0;
+    const sb = signalRank[b.ev.signal ?? "low"] ?? 0;
+    if (sb !== sa) return sb - sa;
+    return b.ts - a.ts;
+  });
+  const top = parsed.slice(0, EVENTS_MAX_RETURNED);
+  return top.map(({ ts, ev }) => ({
+    source: ev.source ?? "unknown",
+    signal: ev.signal ?? "low",
+    sentiment: ev.sentiment ?? "neutral",
+    symbols: ev.symbols ?? [],
+    title: ev.title ?? "",
+    ageMinutes: Math.max(0, Math.floor((now - ts) / 60_000)),
+  }));
 }
 
 const CLOSED_POSITIONS_KEY = "ai-scalper:trader:positions:closed";
+const EVENTS_RECENT_KEY = "ai-scalper:events:recent";
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+const EVENTS_LOOKBACK_MS = 4 * 60 * 60 * 1000;
+const EVENTS_MAX_RETURNED = 8;
 
 function safeNumber(s: string | undefined): number {
   if (!s) return 0;
@@ -71,13 +129,15 @@ export function summarizeKlines(klines: ReadonlyArray<{
 async function collectChartContext(deps: {
   client: BybitClient;
   tickerSource: TickerSource;
+  redis?: RedisLike | null;
 }): Promise<ChartContext | undefined> {
   try {
-    const [k5, k60, k240, ticker] = await Promise.all([
+    const [k5, k60, k240, ticker, recentEvents] = await Promise.all([
       deps.client.getKlines({ category: "linear", symbol: "BTCUSDT", interval: "5", limit: 24 }),
       deps.client.getKlines({ category: "linear", symbol: "BTCUSDT", interval: "60", limit: 24 }),
       deps.client.getKlines({ category: "linear", symbol: "BTCUSDT", interval: "240", limit: 24 }),
       deps.tickerSource.getTicker("BTCUSDT", { category: "linear" }),
+      collectRecentEvents(deps.redis ?? null),
     ]);
     const bid = safeNumber(ticker.bid1Price);
     const ask = safeNumber(ticker.ask1Price);
@@ -88,6 +148,7 @@ async function collectChartContext(deps: {
       klines1h: summarizeKlines(k60),
       klines4h: summarizeKlines(k240),
       orderbook: { bid1Price: bid, ask1Price: ask, spreadBps },
+      ...(recentEvents.length > 0 ? { recentEvents } : {}),
     };
   } catch {
     return undefined;
@@ -99,6 +160,9 @@ export async function collectRegime(deps: {
   tickerSource: TickerSource;
   scanLatestPath?: string;
   observedAt?: string;
+  /** Optional Redis client used to pull recent events from the event-feeder
+   *  via collectRecentEvents. */
+  redis?: RedisLike | null;
 }): Promise<MarketRegimeSnapshot> {
   const observedAt = deps.observedAt ?? new Date().toISOString();
   let btcPrice = 0;
@@ -174,8 +238,10 @@ export async function collectRegime(deps: {
     }
   } catch { /* ignore */ }
 
-  // Chart context (multi-TF + L1 OB) — best-effort, undefined on failure.
-  const chartContext = await collectChartContext({ client: deps.client, tickerSource: deps.tickerSource });
+  // Chart context (multi-TF + L1 OB + recent events) — best-effort.
+  const chartContext = await collectChartContext({
+    client: deps.client, tickerSource: deps.tickerSource, redis: deps.redis ?? null,
+  });
 
   return {
     observedAt,

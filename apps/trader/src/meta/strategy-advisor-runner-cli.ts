@@ -79,7 +79,7 @@ async function main(): Promise<void> {
       alertWebhookUrl: config.alertWebhookUrl,
       outputPath,
     },
-    collectRegime: () => collectRegime({ client, tickerSource }),
+    collectRegime: () => collectRegime({ client, tickerSource, redis }),
     collectPerformance: () => collectPerformance({ redis }),
     postWebhook: (msg, ctx) => webhook.send(msg, ctx),
     shouldStop: () => stopRequested,
